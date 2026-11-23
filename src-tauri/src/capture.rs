@@ -1,4 +1,5 @@
 use arboard::Clipboard;
+#[cfg(not(target_os = "macos"))]
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -171,23 +172,46 @@ pub fn ax_probe() -> String {
     ax::probe()
 }
 
+/// macOS：直接用 CGEvent 发 ⌘C。
+///
+/// 不再用 enigo —— 它在 macOS 上会通过 Text Services 把字符映射成键，
+/// 而 `TSMCurrentKeyboardInputSourceRefCreate` 是主线程专属 API，
+/// 从事件线程调用会被 libdispatch 的 `dispatch_assert_queue` 断言打死（SIGTRAP）。
+#[cfg(target_os = "macos")]
+fn send_copy() -> Option<()> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    const KEY_C: u16 = 8;
+    let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+    let down = CGEvent::new_keyboard_event(src.clone(), KEY_C, true).ok()?;
+    down.set_flags(CGEventFlags::CGEventFlagCommand);
+    down.post(CGEventTapLocation::HID);
+    sleep(Duration::from_millis(18));
+    let up = CGEvent::new_keyboard_event(src, KEY_C, false).ok()?;
+    up.set_flags(CGEventFlags::CGEventFlagCommand);
+    up.post(CGEventTapLocation::HID);
+    sleep(Duration::from_millis(12));
+    Some(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_copy() -> Option<()> {
+    let mut enigo = Enigo::new(&Settings::default()).ok()?;
+    enigo.key(Key::Control, Direction::Press).ok()?;
+    sleep(Duration::from_millis(18));
+    enigo.key(Key::Unicode('c'), Direction::Click).ok()?;
+    sleep(Duration::from_millis(12));
+    let _ = enigo.key(Key::Control, Direction::Release);
+    Some(())
+}
+
 /// 通过模拟复制读选区：兜底路径，能应对 AX 拿不到选区的应用（浏览器、PDF 阅读器常见）。
 fn clipboard_select() -> Option<String> {
     let mut cb = Clipboard::new().ok()?;
     let before = cb.get_text().ok().unwrap_or_default();
 
-    let mut enigo = Enigo::new(&Settings::default()).ok()?;
-    let modifier = if cfg!(target_os = "macos") {
-        Key::Meta
-    } else {
-        Key::Control
-    };
-
-    enigo.key(modifier, Direction::Press).ok()?;
-    sleep(Duration::from_millis(18));
-    enigo.key(Key::Unicode('c'), Direction::Click).ok()?;
-    sleep(Duration::from_millis(12));
-    let _ = enigo.key(modifier, Direction::Release);
+    send_copy()?;
 
     let deadline = Instant::now() + Duration::from_millis(420);
     let mut grabbed: Option<String> = None;

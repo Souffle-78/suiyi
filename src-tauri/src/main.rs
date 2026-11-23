@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 mod capture;
 mod config;
 mod history;
+mod hook;
 mod log;
 mod permissions;
 mod translate;
@@ -206,6 +207,24 @@ fn pick_monitor(app: &AppHandle, lx: i32, ly: i32) -> Option<tauri::Monitor> {
     monitors.into_iter().next()
 }
 
+/// 最近一次鼠标位置（逻辑点，左上角原点）。由全局钩子持续刷新。
+static LAST_CURSOR: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+fn note_cursor(x: f64, y: f64) {
+    if let Ok(mut c) = LAST_CURSOR.lock() {
+        *c = Some((x, y));
+    }
+}
+
+fn last_cursor() -> (i32, i32) {
+    LAST_CURSOR
+        .lock()
+        .ok()
+        .and_then(|c| *c)
+        .map(|(x, y)| (x as i32, y as i32))
+        .unwrap_or((600, 300))
+}
+
 /// 读剪贴板文本（菜单「翻译剪贴板」用）
 fn clipboard_text() -> Option<String> {
     let mut cb = arboard::Clipboard::new().ok()?;
@@ -216,10 +235,7 @@ fn clipboard_text() -> Option<String> {
 
 /// 在鼠标附近翻译一段给定文本（不依赖划词）
 fn translate_given(app: &AppHandle, text: String) {
-    let (lx, ly) = enigo::Enigo::new(&enigo::Settings::default())
-        .ok()
-        .and_then(|mut e| enigo::Mouse::location(&mut e).ok())
-        .unwrap_or((600, 300));
+    let (lx, ly) = last_cursor();
     show_bubble(app, lx, ly, BubblePayload {
         source: text.chars().take(90).collect(),
         text: String::new(),
@@ -268,8 +284,6 @@ fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
     let monitor = pick_monitor(app, x, y);
     let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
     let origin = monitor.as_ref().map(|m| *m.position()).unwrap_or(PhysicalPosition::new(0, 0));
-    let lx0 = origin.x as f64 / scale;
-    let ly0 = origin.y as f64 / scale;
 
     let (mut px, mut py) = logical_to_physical(x, y + 18, origin, scale);
 
@@ -311,149 +325,28 @@ fn ensure_hook(app: AppHandle, shared: Arc<Shared>) {
 
 fn start_hook(app: AppHandle, shared: Arc<Shared>) {
     thread::spawn(move || {
-        let mut pressed: Option<(f64, f64, Instant)> = None;
-        let mut cursor: (f64, f64) = (0.0, 0.0);
-        // macOS 上拖拽过程中的位移事件不一定以 MouseMove 形式送到，改用系统光标位置兜底
-        let mut pointer = enigo::Enigo::new(&enigo::Settings::default()).ok();
-        let here = |pointer: &mut Option<enigo::Enigo>, fallback: (f64, f64)| -> (f64, f64) {
-            pointer
-                .as_mut()
-                .and_then(|e| enigo::Mouse::location(e).ok())
-                .map(|(x, y)| (x as f64, y as f64))
-                .unwrap_or(fallback)
-        };
-
         let trace = std::env::var("SUIYI_TRACE").is_ok();
-        let result = rdev::listen(move |event| { if trace { log::line(format!("ev {:?}", event.event_type)); } match event.event_type {
-            rdev::EventType::MouseMove { x, y } => {
-                cursor = (x, y);
+        let handler_app = app.clone();
+        let handler_shared = shared.clone();
+        let pressed: std::cell::Cell<Option<(f64, f64, Instant)>> = std::cell::Cell::new(None);
+
+        let result = hook::listen(move |ev| {
+            if trace {
+                log::line(format!("ev {:?}", ev));
             }
-            rdev::EventType::ButtonPress(rdev::Button::Left) => {
-                cursor = here(&mut pointer, cursor);
-                pressed = Some((cursor.0, cursor.1, Instant::now()));
-                if let Some(win) = app.get_webview_window("bubble") {
-                    if win.is_visible().unwrap_or(false) {
-                        if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
-                            // cursor 是逻辑点，窗口位置是物理像素，先换算
-                            let (px, py) = cursor_physical(&app, cursor.0 as i32, cursor.1 as i32);
-                            let inside = px >= pos.x
-                                && px <= pos.x + size.width as i32
-                                && py >= pos.y
-                                && py <= pos.y + size.height as i32;
-                            if !inside {
-                                let _ = win.hide();
-                            }
-                        }
-                    }
+            match ev {
+                hook::MouseEvent::Down(x, y) => {
+                    note_cursor(x, y);
+                    pressed.set(Some((x, y, Instant::now())));
+                    hide_bubble_if_outside(&handler_app, x, y);
+                }
+                hook::MouseEvent::Dragged(x, y) => note_cursor(x, y),
+                hook::MouseEvent::Up(x, y) => {
+                    let Some((sx, sy, at)) = pressed.take() else { return };
+                    on_release(&handler_app, &handler_shared, sx, sy, at, x, y);
                 }
             }
-            rdev::EventType::ButtonRelease(rdev::Button::Left) => {
-                let Some((sx, sy, at)) = pressed.take() else { return };
-                cursor = here(&mut pointer, cursor);
-                if !shared.enabled.load(Ordering::Relaxed) {
-                    return;
-                }
-                let dx = cursor.0 - sx;
-                let dy = cursor.1 - sy;
-                let dragged = (dx * dx + dy * dy).sqrt() >= 7.0;
-                log::line(format!("release dragged={dragged} at ({:.0},{:.0})", cursor.0, cursor.1));
-                if !dragged || at.elapsed() > Duration::from_secs(6) {
-                    return;
-                }
-                if inside_own_window(&app, cursor.0 as i32, cursor.1 as i32) {
-                    log::line("release inside own window — skip");
-                    return;
-                }
-                let (x, y) = (cursor.0 as i32, cursor.1 as i32);
-                let app = app.clone();
-                let shared = shared.clone();
-                thread::spawn(move || {
-                    thread::sleep(Duration::from_millis(60));
-                    log::line("capturing selection…");
-                    let Some(text) = capture::select_text() else {
-                        log::line("no selection captured");
-                        if !permissions::is_trusted() {
-                            show_bubble(
-                                &app,
-                                x,
-                                y,
-                                BubblePayload {
-                                    source: String::new(),
-                                    text: String::new(),
-                                    detected: String::new(),
-                                    target: String::new(),
-                                    provider: String::new(),
-                                    loading: false,
-                                    error: Some("需要「辅助功能」权限才能读取选区：系统设置 → 隐私与安全性 → 辅助功能 → 勾选随译".into()),
-                                },
-                            );
-                        }
-                        return;
-                    };
-                    if text.chars().count() < 1 {
-                        return;
-                    }
-                    {
-                        let mut last = shared.last.lock().unwrap();
-                        let mut last_at = shared.last_at.lock().unwrap();
-                        if *last == text && last_at.elapsed() < Duration::from_secs(2) {
-                            return;
-                        }
-                        *last = text.clone();
-                        *last_at = Instant::now();
-                    }
-                    let cfg = config::load();
-                    show_bubble(
-                        &app,
-                        x,
-                        y,
-                        BubblePayload {
-                            source: text.clone(),
-                            text: String::new(),
-                            detected: String::new(),
-                            target: cfg.target.clone(),
-                            provider: cfg.provider.clone(),
-                            loading: true,
-                            error: None,
-                        },
-                    );
-                    let payload = match translate::run(&text, &cfg) {
-                        Ok(t) => {
-                            history::record(&t);
-                            BubblePayload {
-                                source: t.source,
-                                text: t.text,
-                                detected: t.detected,
-                                target: t.target,
-                                provider: t.provider,
-                                loading: false,
-                                error: None,
-                            }
-                        }
-                        Err(e) => BubblePayload {
-                            source: text,
-                            text: String::new(),
-                            detected: String::new(),
-                            target: cfg.target.clone(),
-                            provider: cfg.provider.clone(),
-                            loading: false,
-                            error: Some(e),
-                        },
-                    };
-                    let gen = show_bubble(&app, x, y, payload);
-                    let app_hide = app.clone();
-                    thread::spawn(move || {
-                        thread::sleep(Duration::from_secs(25));
-                        if SHOW_GEN.load(Ordering::SeqCst) == gen {
-                            if let Some(win) = app_hide.get_webview_window("bubble") {
-                                let _ = win.hide();
-                            }
-                        }
-                    });
-                });
-            }
-            _ => {}
-        }});
+        });
 
         if let Err(e) = result {
             // 监听鼠标需要「输入监控」权限；没有时 CGEventTap 建不起来。
@@ -467,6 +360,137 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
             thread::sleep(Duration::from_secs(2));
         }
     });
+}
+
+/// 松开鼠标：判断是否为「拖动选择」，然后抓选区、翻译、弹气泡。
+fn on_release(
+    app: &AppHandle,
+    shared: &Arc<Shared>,
+    sx: f64,
+    sy: f64,
+    at: Instant,
+    x: f64,
+    y: f64,
+) {
+    if !shared.enabled.load(Ordering::Relaxed) {
+        return;
+    }
+    let dx = x - sx;
+    let dy = y - sy;
+    let dragged = (dx * dx + dy * dy).sqrt() >= 7.0;
+    log::line(format!("release dragged={dragged} at ({x:.0},{y:.0})"));
+    if !dragged || at.elapsed() > Duration::from_secs(6) {
+        return;
+    }
+    if inside_own_window(app, x as i32, y as i32) {
+        log::line("release inside own window — skip");
+        return;
+    }
+    let (bx, by) = (x as i32, y as i32);
+    let app = app.clone();
+    let shared = shared.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(60));
+        log::line("capturing selection…");
+        let Some(text) = capture::select_text() else {
+            log::line("no selection captured");
+            if !permissions::is_trusted() {
+                show_bubble(
+                    &app,
+                    bx,
+                    by,
+                    BubblePayload {
+                        source: String::new(),
+                        text: String::new(),
+                        detected: String::new(),
+                        target: String::new(),
+                        provider: String::new(),
+                        loading: false,
+                        error: Some("需要「辅助功能」权限才能读取选区：系统设置 → 隐私与安全性 → 辅助功能 → 勾选随译".into()),
+                    },
+                );
+            }
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        {
+            let mut last = shared.last.lock().unwrap();
+            let mut last_at = shared.last_at.lock().unwrap();
+            if *last == text && last_at.elapsed() < Duration::from_secs(2) {
+                return;
+            }
+            *last = text.clone();
+            *last_at = Instant::now();
+        }
+        let cfg = config::load();
+        show_bubble(
+            &app,
+            bx,
+            by,
+            BubblePayload {
+                source: text.clone(),
+                text: String::new(),
+                detected: String::new(),
+                target: cfg.target.clone(),
+                provider: cfg.provider.clone(),
+                loading: true,
+                error: None,
+            },
+        );
+        let payload = match translate::run(&text, &cfg) {
+            Ok(t) => {
+                history::record(&t);
+                BubblePayload {
+                    source: t.source,
+                    text: t.text,
+                    detected: t.detected,
+                    target: t.target,
+                    provider: t.provider,
+                    loading: false,
+                    error: None,
+                }
+            }
+            Err(e) => BubblePayload {
+                source: text,
+                text: String::new(),
+                detected: String::new(),
+                target: cfg.target.clone(),
+                provider: cfg.provider.clone(),
+                loading: false,
+                error: Some(e),
+            },
+        };
+        let gen = show_bubble(&app, bx, by, payload);
+        let app_hide = app.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(25));
+            if SHOW_GEN.load(Ordering::SeqCst) == gen {
+                if let Some(win) = app_hide.get_webview_window("bubble") {
+                    let _ = win.hide();
+                }
+            }
+        });
+    });
+}
+
+/// 点击落在气泡外面时把气泡藏掉。
+fn hide_bubble_if_outside(app: &AppHandle, x: f64, y: f64) {
+    if let Some(win) = app.get_webview_window("bubble") {
+        if win.is_visible().unwrap_or(false) {
+            if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
+                let (px, py) = cursor_physical(app, x as i32, y as i32);
+                let inside = px >= pos.x
+                    && px <= pos.x + size.width as i32
+                    && py >= pos.y
+                    && py <= pos.y + size.height as i32;
+                if !inside {
+                    let _ = win.hide();
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -684,7 +708,7 @@ fn main() {
                     }
                     _ => {}
                 })
-                .on_tray_icon_event(move |tray, event| {
+                .on_tray_icon_event(move |_tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
