@@ -193,6 +193,58 @@ fn pick_monitor(app: &AppHandle, lx: i32, ly: i32) -> Option<tauri::Monitor> {
     monitors.into_iter().next()
 }
 
+/// 读剪贴板文本（菜单「翻译剪贴板」用）
+fn clipboard_text() -> Option<String> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    let text = cb.get_text().ok()?;
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
+/// 在鼠标附近翻译一段给定文本（不依赖划词）
+fn translate_given(app: &AppHandle, text: String) {
+    let (lx, ly) = enigo::Enigo::new(&enigo::Settings::default())
+        .ok()
+        .and_then(|mut e| enigo::Mouse::location(&mut e).ok())
+        .unwrap_or((600, 300));
+    show_bubble(app, lx, ly, BubblePayload {
+        source: text.chars().take(90).collect(),
+        text: String::new(),
+        detected: String::new(),
+        target: String::new(),
+        provider: String::new(),
+        loading: true,
+        error: None,
+    });
+    let app = app.clone();
+    thread::spawn(move || {
+        let cfg = config::load();
+        match translate::run(&text, &cfg) {
+            Ok(t) => {
+                history::record(&t);
+                let _ = show_bubble(&app, lx, ly, BubblePayload {
+                    source: t.source.chars().take(90).collect(),
+                    text: t.text.clone(),
+                    detected: t.detected.clone(),
+                    target: t.target.clone(),
+                    provider: t.provider.clone(),
+                    loading: false,
+                    error: None,
+                });
+            }
+            Err(e) => { let _ = show_bubble(&app, lx, ly, BubblePayload {
+                source: text.chars().take(90).collect(),
+                text: String::new(),
+                detected: String::new(),
+                target: String::new(),
+                provider: String::new(),
+                loading: false,
+                error: Some(e),
+            }); }
+        }
+    });
+}
+
 fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
     let Some(win) = app.get_webview_window("bubble") else {
         return 0;
@@ -433,6 +485,23 @@ fn main() {
             }
             return;
         }
+        if mode == "clip" {
+            match clipboard_text() {
+                Some(text) => {
+                    println!("clipboard {} chars", text.chars().count());
+                    let cfg = config::load();
+                    match translate::run(&text, &cfg) {
+                        Ok(t) => {
+                            history::record(&t);
+                            println!("provider={} → {}", t.provider, t.text.chars().take(80).collect::<String>());
+                        }
+                        Err(e) => println!("ERR {e}"),
+                    }
+                }
+                None => println!("clipboard empty"),
+            }
+            return;
+        }
         if mode == "pipeline" {
             // 端到端（不含鼠标钩子）：抓选区 → 翻译 → 写历史
             println!("trusted={}", permissions::is_trusted());
@@ -527,9 +596,13 @@ fn main() {
             let toggle = MenuItem::with_id(app, "toggle", "暂停划词", true, None::<&str>)?;
             let settings_item = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
             let history_item = MenuItem::with_id(app, "history", "历史记录…", true, None::<&str>)?;
+            let clip_item = MenuItem::with_id(app, "clip", "翻译剪贴板", true, None::<&str>)?;
             let perm = MenuItem::with_id(app, "perm", "辅助功能权限…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出随译", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&toggle, &settings_item, &history_item, &perm, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[&toggle, &clip_item, &settings_item, &history_item, &perm, &quit],
+            )?;
 
             let mut tray = TrayIconBuilder::new().tooltip("随译 · 选中即翻译");
             if let Some(icon) = app.default_window_icon() {
@@ -543,6 +616,18 @@ fn main() {
                     "perm" => permissions::open_settings(),
                     "settings" => open_settings_window(_app),
                     "history" => open_window(_app, "history"),
+                    "clip" => match clipboard_text() {
+                        Some(text) => translate_given(_app, text),
+                        None => { let _ = show_bubble(_app, 600, 300, BubblePayload {
+                            source: "剪贴板".into(),
+                            text: String::new(),
+                            detected: String::new(),
+                            target: String::new(),
+                            provider: String::new(),
+                            loading: false,
+                            error: Some("剪贴板里没有可翻译的文字".into()),
+                        }); }
+                    },
                     "toggle" => {
                         let now = !toggle_shared.enabled.load(Ordering::Relaxed);
                         toggle_shared.enabled.store(now, Ordering::Relaxed);

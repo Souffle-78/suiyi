@@ -23,6 +23,7 @@ SUIYI_PROBE=vocab ./src-tauri/target/debug/suiyi    # 生词本增删查 + Markd
 SUIYI_PROBE=autostart ./src-tauri/target/debug/suiyi # 开机自启开关（会先开后关，不留痕）
 SUIYI_PROBE=fallback ./src-tauri/target/debug/suiyi  # 备用线路 MyMemory
 SUIYI_PROBE=pipeline ./src-tauri/target/debug/suiyi  # 端到端（抓选区→翻译→写历史），不含鼠标钩子
+SUIYI_PROBE=clip ./src-tauri/target/debug/suiyi      # 翻译剪贴板
 cargo test                                  # 解析与坐标换算的单元测试
 # OK google → 你好，世界…
 ```
