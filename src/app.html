@@ -139,6 +139,7 @@
   .radio b { display: block; font-size: 12.5px; margin-bottom: 2px; }
   .radio span { font-size: 11px; color: var(--muted); }
   .row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+  .chip.off { color: var(--muted); background: transparent; }
   .row input[type=checkbox] { width: 14px; height: 14px; accent-color: var(--brand); }
   .hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
   .hide { display: none !important; }
@@ -199,6 +200,7 @@
           <option value="deepseek">DeepSeek 精翻</option>
         </select>
         <span class="grow"></span>
+        <button class="chip" id="selToggle" title="选中文字后是否自动弹译文（也可在设置里改）">划词 开</button>
         <span class="kbd">⌘↩ 翻译</span>
       </div>
 
@@ -261,6 +263,15 @@
 
     <!-- 设置 -->
     <section class="page" id="page-settings">
+      <div class="setting">
+        <h3>划词翻译</h3>
+        <div class="row">
+          <input type="checkbox" id="sSelection" />
+          <label for="sSelection">在任意应用里选中文字，松开鼠标就弹出译文</label>
+        </div>
+        <p class="hint">关掉后不再自动弹气泡，其他功能（主界面翻译、查词、菜单栏「翻译剪贴板」）照常可用。菜单栏那一项会跟着变。</p>
+      </div>
+
       <div class="setting">
         <h3>翻译</h3>
         <label class="field">
@@ -326,6 +337,7 @@ function toast(text) {
 }
 
 function switchTab(tab) {
+  invoke('selection_enabled').then(paintSelection).catch(() => {});
   const tabs = ['translate', 'vocab', 'history', 'settings'];
   if (!tabs.includes(tab)) tab = 'translate';
   document.querySelectorAll('.nav').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
@@ -560,6 +572,9 @@ async function loadSettings() {
   $('target').value = cfg.target || 'zh-CN';
   const auto = await invoke('get_autostart').catch(() => false);
   $('sAutostart').checked = !!auto;
+  const sel = await invoke('selection_enabled').catch(() => true);
+  $('sSelection').checked = !!sel;
+  paintSelection(!!sel);
   const perm = await invoke('permission_state').catch(() => null);
   $('permHint').textContent = perm
     ? `辅助功能：${perm.accessibility ? '已授权' : '未授权'} · 输入监控：${perm.inputMonitoring === null ? '不适用' : (perm.inputMonitoring ? '已授权' : '未授权')}`
@@ -595,13 +610,36 @@ $('sAutostart').addEventListener('change', async (e) => {
   if (!ok) e.target.checked = !e.target.checked;
   toast(ok ? '已更新开机启动' : '设置失败');
 });
+function paintSelection(on) {
+  const btn = $('selToggle');
+  if (!btn) return;
+  btn.textContent = on ? '划词 开' : '划词 关';
+  btn.classList.toggle('off', !on);
+}
+async function applySelection(on) {
+  const ok = await invoke('set_selection', { enabled: on }).then(() => true).catch(() => false);
+  if (!ok) return false;
+  $('sSelection').checked = on;
+  paintSelection(on);
+  toast(on ? '划词翻译已开启' : '划词翻译已关闭');
+  return true;
+}
+$('sSelection').addEventListener('change', async (e) => {
+  const ok = await applySelection(e.target.checked);
+  if (!ok) e.target.checked = !e.target.checked;
+});
+$('selToggle').addEventListener('click', async () => {
+  const on = $('selToggle').textContent.includes('关');
+  if (!(await applySelection(on))) toast('切换失败');
+});
+
 $('openAx').addEventListener('click', () => invoke('open_permission_settings'));
 $('openInput').addEventListener('click', () => invoke('open_input_settings'));
 
 // ---------- 启动 ----------
 (async () => {
   await loadSettings();
-  $('ver').textContent = '0.4.2';
+  $('ver').textContent = '0.4.3';
   updateCount();
   const tab = new URLSearchParams(location.search).get('tab');
   switchTab(tab || 'translate');

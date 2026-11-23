@@ -17,6 +17,9 @@ pub struct Config {
     /// 上次展示欢迎气泡的版本号（同一版本只弹一次，别每次开机都弹）
     #[serde(default)]
     pub hello_version: String,
+    /// 划词翻译总开关（主界面「设置 → 划词翻译」与菜单栏同步）
+    #[serde(default = "default_true")]
+    pub selection: bool,
 }
 
 impl Default for Config {
@@ -28,6 +31,7 @@ impl Default for Config {
             deepseek_model: "deepseek-chat".into(),
             glossary: Vec::new(),
             hello_version: String::new(),
+            selection: true,
         }
     }
 }
@@ -54,4 +58,8 @@ pub fn save(cfg: &Config) -> Result<(), String> {
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     let s = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     std::fs::write(path(), s).map_err(|e| e.to_string())
+}
+
+fn default_true() -> bool {
+    true
 }

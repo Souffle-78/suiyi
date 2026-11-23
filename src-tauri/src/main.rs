@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::menu::MenuItemKind;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
 mod capture;
@@ -33,6 +34,37 @@ static SHOW_GEN: AtomicU64 = AtomicU64::new(0);
 /// 最近一次气泡内容：窗口刚创建时 emit 会丢事件，前端加载完主动来拿一次。
 static LAST_PAYLOAD: Mutex<Option<BubblePayload>> = Mutex::new(None);
 static HOOK_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// 菜单栏菜单句柄：主界面开关变化时要同步「暂停划词 / 开启划词」文案
+struct MenuState(Menu<tauri::Wry>);
+
+fn persist_selection(enabled: bool) {
+    let mut cfg = config::load();
+    cfg.selection = enabled;
+    let _ = config::save(&cfg);
+}
+
+fn sync_tray_label(app: &AppHandle, enabled: bool) {
+    if let Some(state) = app.try_state::<MenuState>() {
+        if let Some(MenuItemKind::MenuItem(item)) = state.0.get("toggle") {
+            let _ = item.set_text(if enabled { "暂停划词" } else { "开启划词" });
+        }
+    }
+}
+
+#[tauri::command]
+fn selection_enabled(shared: tauri::State<'_, Arc<Shared>>) -> bool {
+    shared.enabled.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+fn set_selection(app: AppHandle, shared: tauri::State<'_, Arc<Shared>>, enabled: bool) -> bool {
+    shared.enabled.store(enabled, Ordering::Relaxed);
+    persist_selection(enabled);
+    sync_tray_label(&app, enabled);
+    log::line(format!("selection translation {}", if enabled { "enabled" } else { "disabled" }));
+    enabled
+}
 
 #[tauri::command]
 fn get_config() -> config::Config {
@@ -708,7 +740,7 @@ fn main() {
     }
 
     let shared = Arc::new(Shared {
-        enabled: AtomicBool::new(true),
+        enabled: AtomicBool::new(config::load().selection),
         last: Mutex::new(String::new()),
         last_at: Mutex::new(Instant::now() - Duration::from_secs(60)),
     });
@@ -737,6 +769,9 @@ fn main() {
             }
             // 之前这里设成 Accessory（无 Dock 图标），菜单栏图标一隐藏，用户就完全找不到入口，
             // 表现成「打不开、卡在后台」。改成普通应用：有 Dock 图标，关窗口只是隐藏。
+            // 命令里用 State<Arc<Shared>> 读开关状态，必须先托管
+            app.manage(shared_setup.clone());
+
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
@@ -747,7 +782,14 @@ fn main() {
             let tray_handle = handle.clone();
             let toggle_shared = shared_setup.clone();
 
-            let toggle = MenuItem::with_id(app, "toggle", "暂停划词", true, None::<&str>)?;
+            let selection_on = config::load().selection;
+            let toggle = MenuItem::with_id(
+                app,
+                "toggle",
+                if selection_on { "暂停划词" } else { "开启划词" },
+                true,
+                None::<&str>,
+            )?;
             let settings_item = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
             let history_item = MenuItem::with_id(app, "history", "历史记录…", true, None::<&str>)?;
             let clip_item = MenuItem::with_id(app, "clip", "翻译剪贴板", true, None::<&str>)?;
@@ -757,6 +799,8 @@ fn main() {
                 app,
                 &[&toggle, &clip_item, &settings_item, &history_item, &perm, &quit],
             )?;
+            // 主界面的开关要能同步菜单栏文案，所以把菜单托管起来
+            app.manage(MenuState(menu.clone()));
 
             // 菜单栏图标必须看得见：bundle 图标偶尔取不到（default_window_icon 为 None 时
             // NSStatusItem 会变成一条看不见的空白），所以额外挂文字标题兜底。
@@ -792,6 +836,7 @@ fn main() {
                         let now = !toggle_shared.enabled.load(Ordering::Relaxed);
                         toggle_shared.enabled.store(now, Ordering::Relaxed);
                         let _ = toggle.set_text(if now { "暂停划词" } else { "开启划词" });
+                        persist_selection(now);
                     }
                     _ => {}
                 })
@@ -960,7 +1005,9 @@ fn main() {
             clear_vocab,
             export_vocab_markdown,
             get_autostart,
-            set_autostart
+            set_autostart,
+            selection_enabled,
+            set_selection
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {
