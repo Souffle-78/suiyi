@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>随译需要系统权限</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1c1c1e;
+        --muted: #6b6b70;
+        --bg: #ffffff;
+        --line: #e5e5ea;
+        --brand: #2f6bff;
+        --warn: #f5f5f7;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #f2f2f7;
+          --muted: #9b9ba1;
+          --bg: #1c1c1e;
+          --line: #2f2f34;
+          --warn: #242426;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 20px 22px;
+        font: 13px/1.65 -apple-system, "PingFang SC", BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      h1 { font-size: 16px; margin: 0 0 6px; }
+      p { margin: 0 0 10px; color: var(--muted); }
+      ol { margin: 0 0 12px; padding-left: 20px; color: var(--fg); }
+      ol li { margin-bottom: 4px; }
+      .card {
+        background: var(--warn);
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-bottom: 14px;
+      }
+      .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+      .row { display: flex; gap: 10px; align-items: center; }
+      button {
+        font: inherit;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        padding: 7px 14px;
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--brand);
+        border-color: var(--brand);
+        color: #fff;
+        font-weight: 600;
+      }
+      button:active { transform: translateY(1px); }
+      #status { font-size: 12px; color: var(--muted); margin-left: auto; }
+      #status.ok { color: #1a9d58; }
+    </style>
+  </head>
+  <body>
+    <h1>还差一步：给随译系统权限</h1>
+    <p>要读到「你在别的软件里选中的文字」，macOS 要求应用先拿到下面两个权限。</p>
+
+    <div class="card">
+      <ol>
+        <li>点下面的按钮打开「系统设置 → 隐私与安全性 → 辅助功能」</li>
+        <li>把「随译」打开（列表里没有就先点「打开系统设置」，随译会自动出现在列表）</li>
+        <li>再切到「输入监控」页，把「随译」也打开</li>
+        <li>回到这个窗口点「我开好了，重新检测」</li>
+      </ol>
+      <div class="hint">都打开后不用重启应用，随译会自动开始工作。</div>
+      <div class="hint">若开关已经是打开状态但仍提示没权限：在列表里选中「随译」按 <b>−</b> 删掉，再点一次「打开系统设置」重新加回来并勾选（重新编译过应用，旧授权会失效）。</div>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="open">打开系统设置</button>
+      <button id="recheck">我开好了，重新检测</button>
+      <button id="later">稍后</button>
+      <span id="status"></span>
+    </div>
+
+    <script>
+      const api = window.__TAURI__;
+      const status = document.getElementById('status');
+
+      function setStatus(text, ok) {
+        status.textContent = text;
+        status.classList.toggle('ok', !!ok);
+      }
+
+      document.getElementById('open').addEventListener('click', async () => {
+        try {
+          await api.core.invoke('open_permission_settings');
+          setStatus('已打开系统设置');
+        } catch (err) {
+          setStatus('打开失败：' + err);
+        }
+      });
+
+      document.getElementById('recheck').addEventListener('click', async () => {
+        try {
+          const ok = await api.core.invoke('check_permission');
+          if (ok) {
+            setStatus('权限已就绪 ✓', true);
+            setTimeout(() => api.core.invoke('close_permission_window'), 600);
+          } else {
+            setStatus('还没检测到，请确认两个开关都打开了');
+          }
+        } catch (err) {
+          setStatus('检测失败：' + err);
+        }
+      });
+
+      document.getElementById('later').addEventListener('click', () => {
+        api.core.invoke('close_permission_window');
+      });
+
+      // 每秒自动检测一次，开好权限这个窗口会自己消失
+      setInterval(async () => {
+        try {
+          if (await api.core.invoke('check_permission')) {
+            setStatus('权限已就绪 ✓', true);
+            setTimeout(() => api.core.invoke('close_permission_window'), 600);
+          }
+        } catch (_) {}
+      }, 1500);
+    </script>
+  </body>
+</html>

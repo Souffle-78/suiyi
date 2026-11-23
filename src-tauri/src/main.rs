@@ -1,0 +1,726 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use serde::Serialize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
+
+mod capture;
+mod config;
+mod history;
+mod log;
+mod permissions;
+mod translate;
+mod vocab;
+
+#[derive(Serialize, Clone)]
+struct BubblePayload {
+    source: String,
+    text: String,
+    detected: String,
+    target: String,
+    provider: String,
+    loading: bool,
+    error: Option<String>,
+}
+
+static SHOW_GEN: AtomicU64 = AtomicU64::new(0);
+/// 最近一次气泡内容：窗口刚创建时 emit 会丢事件，前端加载完主动来拿一次。
+static LAST_PAYLOAD: Mutex<Option<BubblePayload>> = Mutex::new(None);
+static HOOK_STARTED: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+fn get_config() -> config::Config {
+    config::load()
+}
+
+#[tauri::command]
+fn set_config(mut cfg: config::Config) -> Result<(), String> {
+    // 设置窗口不带这个字段，别把「已弹过欢迎」的记录清掉
+    if cfg.hello_version.is_empty() {
+        cfg.hello_version = config::load().hello_version;
+    }
+    config::save(&cfg)
+}
+
+#[tauri::command]
+fn bubble_state() -> Option<BubblePayload> {
+    LAST_PAYLOAD.lock().ok().and_then(|guard| guard.clone())
+}
+
+#[tauri::command]
+fn list_history(limit: usize) -> Vec<history::Entry> {
+    history::list(limit)
+}
+
+#[tauri::command]
+fn clear_history() -> Result<(), String> {
+    history::clear()
+}
+
+#[tauri::command]
+fn add_vocab(
+    source: String,
+    text: String,
+    detected: String,
+    target: String,
+) -> Result<bool, String> {
+    vocab::add(&source, &text, &detected, &target)
+}
+
+#[tauri::command]
+fn list_vocab(limit: usize) -> Vec<vocab::VocabEntry> {
+    vocab::list(limit)
+}
+
+#[tauri::command]
+fn remove_vocab(ts: u64) -> Result<(), String> {
+    vocab::remove(ts)
+}
+
+#[tauri::command]
+fn clear_vocab() -> Result<(), String> {
+    vocab::clear()
+}
+
+#[tauri::command]
+fn export_vocab_markdown() -> String {
+    vocab::export_markdown()
+}
+
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let result = if enabled { manager.enable() } else { manager.disable() };
+    result.map_err(|e| e.to_string())?;
+    Ok(manager.is_enabled().unwrap_or(enabled))
+}
+
+fn open_window(app: &AppHandle, label: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(win) = app.get_webview_window(label) {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+fn show_permission_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(win) = app.get_webview_window("permission") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+fn open_settings_window(app: &AppHandle) {
+    open_window(app, "settings");
+}
+
+struct Shared {
+    enabled: AtomicBool,
+    last: Mutex<String>,
+    last_at: Mutex<Instant>,
+}
+
+/// 逻辑点 → 物理像素（含该显示器原点偏移）。
+fn logical_to_physical(lx: i32, ly: i32, origin: PhysicalPosition<i32>, scale: f64) -> (i32, i32) {
+    let ox = origin.x as f64 / scale;
+    let oy = origin.y as f64 / scale;
+    (
+        origin.x + ((lx as f64 - ox) * scale) as i32,
+        origin.y + ((ly as f64 - oy) * scale) as i32,
+    )
+}
+
+/// 光标（逻辑点）→ 物理像素，按它所在显示器换算。
+fn cursor_physical(app: &AppHandle, lx: i32, ly: i32) -> (i32, i32) {
+    match pick_monitor(app, lx, ly) {
+        Some(m) => logical_to_physical(lx, ly, *m.position(), m.scale_factor()),
+        None => (lx, ly),
+    }
+}
+
+/// 松开鼠标的点是否落在我们自己的窗口里（那样不该把它当成「划词」）
+fn inside_own_window(app: &AppHandle, lx: i32, ly: i32) -> bool {
+    let (px, py) = cursor_physical(app, lx, ly);
+    for label in ["bubble", "settings", "history", "permission"] {
+        let Some(win) = app.get_webview_window(label) else { continue };
+        if !win.is_visible().unwrap_or(false) {
+            continue;
+        }
+        if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
+            let inside = px >= pos.x
+                && px <= pos.x + size.width as i32
+                && py >= pos.y
+                && py <= pos.y + size.height as i32;
+            if inside {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 光标坐标（enigo）是逻辑点，Tauri 的窗口位置是物理像素；
+/// 多显示器/Retina 下直接混用会让气泡跑到屏幕左上角，这里按所在显示器换算。
+fn pick_monitor(app: &AppHandle, lx: i32, ly: i32) -> Option<tauri::Monitor> {
+    let monitors = app.available_monitors().unwrap_or_default();
+    for m in &monitors {
+        let s = m.scale_factor();
+        let pos = m.position();
+        let size = m.size();
+        let x0 = pos.x as f64 / s;
+        let y0 = pos.y as f64 / s;
+        let x1 = x0 + size.width as f64 / s;
+        let y1 = y0 + size.height as f64 / s;
+        if (lx as f64) >= x0 && (lx as f64) < x1 && (ly as f64) >= y0 && (ly as f64) < y1 {
+            return Some(m.clone());
+        }
+    }
+    monitors.into_iter().next()
+}
+
+fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
+    let Some(win) = app.get_webview_window("bubble") else {
+        return 0;
+    };
+    let width = 380.0;
+    let height = if payload.loading { 120.0 } else { 200.0 };
+
+    let monitor = pick_monitor(app, x, y);
+    let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+    let origin = monitor.as_ref().map(|m| *m.position()).unwrap_or(PhysicalPosition::new(0, 0));
+    let lx0 = origin.x as f64 / scale;
+    let ly0 = origin.y as f64 / scale;
+
+    let (mut px, mut py) = logical_to_physical(x, y + 18, origin, scale);
+
+    if let Some(m) = monitor.as_ref() {
+        let size = m.size();
+        let pos = m.position();
+        let max_x = pos.x + size.width as i32 - (width * scale) as i32 - 8;
+        let max_y = pos.y + size.height as i32 - (height * scale) as i32 - 8;
+        px = px.min(max_x).max(pos.x + 8);
+        py = py.min(max_y).max(pos.y + 8);
+    }
+
+    log::line(format!(
+        "bubble at ({px},{py}) requested ({x},{y}) size {width}x{height} loading={}",
+        payload.loading
+    ));
+    if let Ok(mut guard) = LAST_PAYLOAD.lock() {
+        *guard = Some(payload.clone());
+    }
+    let _ = win.set_position(PhysicalPosition::new(px, py));
+    let _ = win.emit("suiyi://payload", payload);
+    let _ = win.show();
+    let gen = SHOW_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    gen
+}
+
+/// 只有拿到权限才真正挂全局钩子；没有权限时挂上也收不到事件，白白吓人。
+fn ensure_hook(app: AppHandle, shared: Arc<Shared>) {
+    if !permissions::is_trusted() {
+        log::line("skip hook — accessibility not granted yet");
+        return;
+    }
+    if HOOK_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    log::line("starting global mouse hook");
+    start_hook(app, shared);
+}
+
+fn start_hook(app: AppHandle, shared: Arc<Shared>) {
+    thread::spawn(move || {
+        let mut pressed: Option<(f64, f64, Instant)> = None;
+        let mut cursor: (f64, f64) = (0.0, 0.0);
+        // macOS 上拖拽过程中的位移事件不一定以 MouseMove 形式送到，改用系统光标位置兜底
+        let mut pointer = enigo::Enigo::new(&enigo::Settings::default()).ok();
+        let here = |pointer: &mut Option<enigo::Enigo>, fallback: (f64, f64)| -> (f64, f64) {
+            pointer
+                .as_mut()
+                .and_then(|e| enigo::Mouse::location(e).ok())
+                .map(|(x, y)| (x as f64, y as f64))
+                .unwrap_or(fallback)
+        };
+
+        let result = rdev::listen(move |event| match event.event_type {
+            rdev::EventType::MouseMove { x, y } => {
+                cursor = (x, y);
+            }
+            rdev::EventType::ButtonPress(rdev::Button::Left) => {
+                cursor = here(&mut pointer, cursor);
+                pressed = Some((cursor.0, cursor.1, Instant::now()));
+                if let Some(win) = app.get_webview_window("bubble") {
+                    if win.is_visible().unwrap_or(false) {
+                        if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
+                            // cursor 是逻辑点，窗口位置是物理像素，先换算
+                            let (px, py) = cursor_physical(&app, cursor.0 as i32, cursor.1 as i32);
+                            let inside = px >= pos.x
+                                && px <= pos.x + size.width as i32
+                                && py >= pos.y
+                                && py <= pos.y + size.height as i32;
+                            if !inside {
+                                let _ = win.hide();
+                            }
+                        }
+                    }
+                }
+            }
+            rdev::EventType::ButtonRelease(rdev::Button::Left) => {
+                let Some((sx, sy, at)) = pressed.take() else { return };
+                cursor = here(&mut pointer, cursor);
+                if !shared.enabled.load(Ordering::Relaxed) {
+                    return;
+                }
+                let dx = cursor.0 - sx;
+                let dy = cursor.1 - sy;
+                let dragged = (dx * dx + dy * dy).sqrt() >= 7.0;
+                log::line(format!("release dragged={dragged} at ({:.0},{:.0})", cursor.0, cursor.1));
+                if !dragged || at.elapsed() > Duration::from_secs(6) {
+                    return;
+                }
+                if inside_own_window(&app, cursor.0 as i32, cursor.1 as i32) {
+                    log::line("release inside own window — skip");
+                    return;
+                }
+                let (x, y) = (cursor.0 as i32, cursor.1 as i32);
+                let app = app.clone();
+                let shared = shared.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(60));
+                    log::line("capturing selection…");
+                    let Some(text) = capture::select_text() else {
+                        log::line("no selection captured");
+                        if !permissions::is_trusted() {
+                            show_bubble(
+                                &app,
+                                x,
+                                y,
+                                BubblePayload {
+                                    source: String::new(),
+                                    text: String::new(),
+                                    detected: String::new(),
+                                    target: String::new(),
+                                    provider: String::new(),
+                                    loading: false,
+                                    error: Some("需要「辅助功能」权限才能读取选区：系统设置 → 隐私与安全性 → 辅助功能 → 勾选随译".into()),
+                                },
+                            );
+                        }
+                        return;
+                    };
+                    if text.chars().count() < 1 {
+                        return;
+                    }
+                    {
+                        let mut last = shared.last.lock().unwrap();
+                        let mut last_at = shared.last_at.lock().unwrap();
+                        if *last == text && last_at.elapsed() < Duration::from_secs(2) {
+                            return;
+                        }
+                        *last = text.clone();
+                        *last_at = Instant::now();
+                    }
+                    let cfg = config::load();
+                    show_bubble(
+                        &app,
+                        x,
+                        y,
+                        BubblePayload {
+                            source: text.clone(),
+                            text: String::new(),
+                            detected: String::new(),
+                            target: cfg.target.clone(),
+                            provider: cfg.provider.clone(),
+                            loading: true,
+                            error: None,
+                        },
+                    );
+                    let payload = match translate::run(&text, &cfg) {
+                        Ok(t) => {
+                            history::record(&t);
+                            BubblePayload {
+                                source: t.source,
+                                text: t.text,
+                                detected: t.detected,
+                                target: t.target,
+                                provider: t.provider,
+                                loading: false,
+                                error: None,
+                            }
+                        }
+                        Err(e) => BubblePayload {
+                            source: text,
+                            text: String::new(),
+                            detected: String::new(),
+                            target: cfg.target.clone(),
+                            provider: cfg.provider.clone(),
+                            loading: false,
+                            error: Some(e),
+                        },
+                    };
+                    let gen = show_bubble(&app, x, y, payload);
+                    let app_hide = app.clone();
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_secs(25));
+                        if SHOW_GEN.load(Ordering::SeqCst) == gen {
+                            if let Some(win) = app_hide.get_webview_window("bubble") {
+                                let _ = win.hide();
+                            }
+                        }
+                    });
+                });
+            }
+            _ => {}
+        });
+
+        if let Err(e) = result {
+            log::line(format!("input hook failed: {e:?}"));
+        }
+    });
+}
+
+#[tauri::command]
+fn open_permission_settings() {
+    permissions::open_settings();
+}
+
+#[tauri::command]
+fn check_permission() -> bool {
+    permissions::is_trusted()
+}
+
+#[tauri::command]
+fn close_permission_window(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("permission") {
+        let _ = win.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+}
+
+fn main() {
+    // 无界面自检：SUIYI_PROBE=1 ./suiyi
+    if let Ok(mode) = std::env::var("SUIYI_PROBE") {
+        if mode == "autostart" {
+            // 交给 setup 里的自检分支处理（需要 AppHandle）
+        } else if mode == "vocab" {
+            let added = vocab::add("hello world", "你好，世界", "en", "zh-CN");
+            println!("add -> {added:?}");
+            let again = vocab::add("hello world", "你好，世界", "en", "zh-CN");
+            println!("add duplicate -> {again:?}");
+            for e in vocab::list(5) {
+                println!("- {} => {} ({})", e.source, e.text, e.target);
+            }
+            println!("markdown head:");
+            for line in vocab::export_markdown().lines().take(3) {
+                println!("{line}");
+            }
+            return;
+        }
+        if mode == "pipeline" {
+            // 端到端（不含鼠标钩子）：抓选区 → 翻译 → 写历史
+            println!("trusted={}", permissions::is_trusted());
+            let started = Instant::now();
+            match capture::select_text() {
+                Some(text) => {
+                    println!("captured {} chars: {}", text.chars().count(), text.chars().take(60).collect::<String>());
+                    let cfg = config::load();
+                    match translate::run(&text, &cfg) {
+                        Ok(t) => {
+                            history::record(&t);
+                            println!("provider={} detected={} target={}", t.provider, t.detected, t.target);
+                            println!("text: {}", t.text.chars().take(80).collect::<String>());
+                        }
+                        Err(e) => println!("translate ERR {e}"),
+                    }
+                }
+                None => println!("capture FAILED (no selection?)"),
+            }
+            println!("elapsed {:?}", started.elapsed());
+            return;
+        }
+        if mode == "fallback" {
+            match translate::my_memory("Hello world, this is the offline fallback line.", "zh-CN") {
+                Ok(t) => println!("OK {} → {}", t.provider, t.text),
+                Err(e) => println!("ERR {e}"),
+            }
+            return;
+        }
+        if mode == "capture" {
+            println!("trusted={}", permissions::is_trusted());
+            println!("{}", capture::ax_probe());
+            match capture::select_text() {
+                Some(t) => println!(
+                    "CAPTURED {} chars: {}",
+                    t.chars().count(),
+                    t.chars().take(120).collect::<String>()
+                ),
+                None => println!("CAPTURE FAILED (no selection or no permission)"),
+            }
+            return;
+        }
+        if mode == "history" {
+            for e in history::list(20) {
+                println!("{} [{}] {} => {}", e.ts, e.provider, e.source.chars().take(40).collect::<String>(), e.text.chars().take(40).collect::<String>());
+            }
+            return;
+        }
+        if mode != "autostart" {
+            let cfg = config::load();
+            println!("provider={} target={}", cfg.provider, cfg.target);
+            match translate::run("Hello world, this is a quick probe.", &cfg) {
+                Ok(t) => println!("OK {} → {}", t.provider, t.text),
+                Err(e) => println!("ERR {e}"),
+            }
+            return;
+        }
+    }
+
+    let shared = Arc::new(Shared {
+        enabled: AtomicBool::new(true),
+        last: Mutex::new(String::new()),
+        last_at: Mutex::new(Instant::now() - Duration::from_secs(60)),
+    });
+
+    let shared_setup = shared.clone();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .setup(move |app| {
+            // 自检：SUIYI_PROBE=autostart ./suiyi
+            if std::env::var("SUIYI_PROBE").as_deref() == Ok("autostart") {
+                use tauri_plugin_autostart::ManagerExt;
+                let manager = app.autolaunch();
+                println!("before -> {:?}", manager.is_enabled());
+                println!("enable -> {:?}", manager.enable());
+                println!("after  -> {:?}", manager.is_enabled());
+                println!("disable -> {:?}", manager.disable());
+                println!("final  -> {:?}", manager.is_enabled());
+                return Ok(());
+            }
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            let handle = app.handle().clone();
+            let tray_handle = handle.clone();
+            let toggle_shared = shared_setup.clone();
+
+            let toggle = MenuItem::with_id(app, "toggle", "暂停划词", true, None::<&str>)?;
+            let settings_item = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
+            let history_item = MenuItem::with_id(app, "history", "历史记录…", true, None::<&str>)?;
+            let perm = MenuItem::with_id(app, "perm", "辅助功能权限…", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出随译", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&toggle, &settings_item, &history_item, &perm, &quit])?;
+
+            let mut tray = TrayIconBuilder::new().tooltip("随译 · 选中即翻译");
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(move |_app, event| match event.id.as_ref() {
+                    "quit" => std::process::exit(0),
+                    "perm" => permissions::open_settings(),
+                    "settings" => open_settings_window(_app),
+                    "history" => open_window(_app, "history"),
+                    "toggle" => {
+                        let now = !toggle_shared.enabled.load(Ordering::Relaxed);
+                        toggle_shared.enabled.store(now, Ordering::Relaxed);
+                        let _ = toggle.set_text(if now { "暂停划词" } else { "开启划词" });
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(move |_tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(win) = tray_handle.get_webview_window("bubble") {
+                            if win.is_visible().unwrap_or(false) {
+                                let _ = win.hide();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
+            let trusted_now = permissions::is_trusted();
+            if !trusted_now {
+                log::line("accessibility permission missing — asking");
+                permissions::request();
+            }
+
+            log::line(format!(
+                "started · tray icon: {} · trusted: {} · config: {}",
+                app.default_window_icon().is_some(),
+                permissions::is_trusted(),
+                config::path().display()
+            ));
+
+            ensure_hook(handle.clone(), shared_setup.clone());
+
+            // 权限通常是在运行中才点开的，这里轮询一次，拿到权限就自动挂上钩子，不用重启应用
+            let watch_app = handle.clone();
+            let watch_shared = shared_setup.clone();
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_millis(1500));
+                if permissions::is_trusted() && !HOOK_STARTED.load(Ordering::SeqCst) {
+                    log::line("permission granted at runtime — starting hook");
+                    ensure_hook(watch_app.clone(), watch_shared.clone());
+                    if let Some(win) = watch_app.get_webview_window("permission") {
+                        let _ = win.hide();
+                    }
+                    #[cfg(target_os = "macos")]
+                    let _ = watch_app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    show_bubble(
+                        &watch_app,
+                        700,
+                        260,
+                        BubblePayload {
+                            source: "权限已开启".into(),
+                            text: "现在可以划词了：在任意应用里拖选一段文字，松开鼠标就会翻译。".into(),
+                            detected: "suiyi".into(),
+                            target: "ready".into(),
+                            provider: "local".into(),
+                            loading: false,
+                            error: None,
+                        },
+                    );
+                }
+            });
+
+            // 第一次运行没有配置文件时，直接把设置窗口推出来
+            if !config::path().exists() {
+                open_settings_window(&handle);
+            }
+
+            if !trusted_now {
+                let app_perm = handle.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(400));
+                    show_permission_window(&app_perm);
+                });
+            }
+
+            let app_hello = handle.clone();
+            thread::spawn(move || {
+                if !trusted_now {
+                    return; // 没权限时只显示权限窗口，别两个窗口一起弹
+                }
+                let version = env!("CARGO_PKG_VERSION");
+                let mut cfg = config::load();
+                if cfg.hello_version == version {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(500));
+                // 放在主屏顶部中间，别硬编码到某个坐标
+                let (lx, ly) = match app_hello.primary_monitor() {
+                    Ok(Some(m)) => {
+                        let scale = m.scale_factor();
+                        let pos = m.position();
+                        let size = m.size();
+                        let cx = (pos.x as f64 + size.width as f64 / 2.0) / scale - 190.0;
+                        ((cx as i32), ((pos.y as f64 / scale) + 64.0) as i32)
+                    }
+                    _ => (700, 120),
+                };
+                show_bubble(
+                    &app_hello,
+                    lx,
+                    ly,
+                    BubblePayload {
+                        source: "随译已启动".into(),
+                        text: format!(
+                            "选中任意应用里的文字、松开鼠标，就会在这里弹出译文。\n快捷键不需要记；想调语言、线路或术语表，去菜单栏的「随译」菜单。"
+                        ),
+                        detected: "suiyi".into(),
+                        target: version.into(),
+                        provider: "local".into(),
+                        loading: false,
+                        error: None,
+                    },
+                );
+                cfg.hello_version = version.to_string();
+                let _ = config::save(&cfg);
+            });
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            open_permission_settings,
+            check_permission,
+            close_permission_window,
+            get_config,
+            set_config,
+            bubble_state,
+            list_history,
+            clear_history,
+            add_vocab,
+            list_vocab,
+            remove_vocab,
+            clear_vocab,
+            export_vocab_markdown,
+            get_autostart,
+            set_autostart
+        ])
+        .on_window_event(|window, event| {
+            if window.label() == "settings" || window.label() == "history" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = window
+                            .app_handle()
+                            .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    }
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_logical_to_physical_on_retina() {
+        // 主屏逻辑 (700, 260) → 2x 屏物理 (1400, 520)
+        let origin = PhysicalPosition::new(0, 0);
+        assert_eq!(logical_to_physical(700, 260, origin, 2.0), (1400, 520));
+    }
+
+    #[test]
+    fn converts_with_offset_monitor() {
+        // 第二块屏在右边，物理原点 (1920,0)，scale 1 → 逻辑原点也是 1920
+        let origin = PhysicalPosition::new(1920, 0);
+        assert_eq!(logical_to_physical(2100, 100, origin, 1.0), (2100, 100));
+        // 第二块屏是 2x：物理 (3840,0)，逻辑原点 1920
+        let origin2 = PhysicalPosition::new(3840, 0);
+        assert_eq!(logical_to_physical(2000, 300, origin2, 2.0), (4000, 600));
+    }
+}

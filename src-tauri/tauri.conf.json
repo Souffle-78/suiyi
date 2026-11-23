@@ -1,0 +1,84 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "随译",
+  "version": "0.2.5",
+  "identifier": "com.souffle.suiyi",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "bubble",
+        "title": "随译",
+        "url": "bubble.html",
+        "width": 380,
+        "height": 200,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "focus": false,
+        "center": false
+      },
+      {
+        "label": "settings",
+        "title": "随译 · 设置",
+        "url": "settings.html",
+        "width": 560,
+        "height": 660,
+        "visible": false,
+        "resizable": true,
+        "minWidth": 480,
+        "minHeight": 520
+      },
+      {
+        "label": "history",
+        "title": "随译 · 历史",
+        "url": "history.html",
+        "width": 640,
+        "height": 640,
+        "visible": false,
+        "resizable": true,
+        "minWidth": 520,
+        "minHeight": 480
+      },
+      {
+        "label": "permission",
+        "title": "随译需要系统权限",
+        "url": "permission.html",
+        "width": 460,
+        "height": 300,
+        "resizable": false,
+        "visible": false,
+        "center": true,
+        "minimizable": false,
+        "maximizable": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ],
+    "category": "Productivity",
+    "shortDescription": "全局划词翻译",
+    "longDescription": "选中任意应用里的文字，立刻弹出译文。默认免费线路，可选 DeepSeek 精翻与术语表。",
+    "macOS": {
+      "signingIdentity": "Suiyi Dev"
+    }
+  }
+}

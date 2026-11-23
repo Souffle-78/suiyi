@@ -1,0 +1,28 @@
+[package]
+name = "suiyi"
+version = "0.2.5"
+description = "随译 — 全局划词翻译"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "blocking"] }
+urlencoding = "2"
+anyhow = "1"
+rdev = "0.5"
+arboard = "3"
+enigo = "0.2"
+dirs = "5"
+tauri-plugin-autostart = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
