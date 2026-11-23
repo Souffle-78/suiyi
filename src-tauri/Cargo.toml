@@ -1,6 +1,6 @@
 [package]
 name = "suiyi"
-version = "0.4.3"
+version = "0.4.4"
 description = "随译 — 全局划词翻译"
 edition = "2021"
 rust-version = "1.77"
@@ -24,6 +24,7 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 core-foundation = "0.10"
+objc = "0.2"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 enigo = "0.2"

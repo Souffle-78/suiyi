@@ -378,10 +378,36 @@ fn translate_given(app: &AppHandle, text: String) {
     });
 }
 
+
+/// 气泡要跟在「当前所在的空间」上：桌面、别的桌面、以及 Safari 这类全屏应用的空间。
+/// macOS 上用 NSWindowCollectionBehaviorCanJoinAllSpaces + FullScreenAuxiliary 才能做到，
+/// 只设 always_on_top 的话，全屏应用的空间里根本看不到这个窗口。
+#[cfg(target_os = "macos")]
+fn float_over_every_space(win: &tauri::WebviewWindow) {
+    let _ = win.set_visible_on_all_workspaces(true);
+    match win.ns_window() {
+        Ok(ptr) => unsafe {
+            use objc::runtime::Object;
+            use objc::{msg_send, sel, sel_impl};
+            let ns = ptr as *mut Object;
+            // 1 = CanJoinAllSpaces, 256 = FullScreenAuxiliary
+            let behavior: u64 = (1u64 << 0) | (1u64 << 8);
+            let _: () = msg_send![ns, setCollectionBehavior: behavior];
+            // NSFloatingWindowLevel：压在全屏应用之上
+            let _: () = msg_send![ns, setLevel: 3i64];
+        },
+        Err(e) => log::line(format!("bubble ns_window unavailable: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn float_over_every_space(_win: &tauri::WebviewWindow) {}
+
 fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
     let Some(win) = app.get_webview_window("bubble") else {
         return 0;
     };
+    float_over_every_space(&win);
     let width = 380.0;
     let height = if payload.loading { 120.0 } else { 200.0 };
 
@@ -649,6 +675,8 @@ fn main() {
     if let Ok(mode) = std::env::var("SUIYI_PROBE") {
         if mode == "autostart" {
             // 交给 setup 里的自检分支处理（需要 AppHandle）
+        } else if mode == "bubble" {
+            // 交给 setup 里的自检分支处理（需要拿到窗口）
         } else if mode == "vocab" {
             let added = vocab::add("hello world", "你好，世界", "en", "zh-CN");
             println!("add -> {added:?}");
@@ -728,7 +756,7 @@ fn main() {
             }
             return;
         }
-        if mode != "autostart" {
+        if mode != "autostart" && mode != "bubble" {
             let cfg = config::load();
             println!("provider={} target={}", cfg.provider, cfg.target);
             match translate::run("Hello world, this is a quick probe.", &cfg) {
@@ -771,6 +799,28 @@ fn main() {
             // 表现成「打不开、卡在后台」。改成普通应用：有 Dock 图标，关窗口只是隐藏。
             // 命令里用 State<Arc<Shared>> 读开关状态，必须先托管
             app.manage(shared_setup.clone());
+
+            if let Some(bubble) = app.get_webview_window("bubble") {
+                float_over_every_space(&bubble);
+                if std::env::var("SUIYI_PROBE").as_deref() == Ok("bubble") {
+                    #[cfg(target_os = "macos")]
+                    unsafe {
+                        use objc::runtime::Object;
+                        use objc::{msg_send, sel, sel_impl};
+                        let ns = bubble.ns_window().unwrap() as *mut Object;
+                        let behavior: u64 = msg_send![ns, collectionBehavior];
+                        let level: i64 = msg_send![ns, level];
+                        println!(
+                            "collectionBehavior=0x{:x} (canJoinAllSpaces={} fullScreenAuxiliary={}) level={}",
+                            behavior,
+                            behavior & 1 != 0,
+                            behavior & 256 != 0,
+                            level
+                        );
+                    }
+                    std::process::exit(0);
+                }
+            }
 
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
