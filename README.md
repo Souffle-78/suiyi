@@ -102,3 +102,8 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
   Linux: `~/.config/suiyi/suiyi.log`），里面有 `skip hook — accessibility not granted` 就是没授权。
 - **译不出来**：设置里换线路试试；Google/Bing 免密钥但有频率限制，长文本建议用 DeepSeek 精翻。
 - **气泡位置怪**：多屏 / 缩放比例不同时会在屏幕边界内夹取，仍可手动拖动（气泡可拖）。
+
+
+## 下载
+
+见 https://github.com/Souffle-78/suiyi/releases
