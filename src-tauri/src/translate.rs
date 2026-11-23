@@ -309,3 +309,91 @@ mod tests {
         assert_eq!(guess_source("混合 mixed"), "zh-CN");
     }
 }
+
+// ---------------------------------------------------------------------------
+// 查词（英英/英汉混排）：用免 key 的 dictionaryapi.dev 拿音标与释义。
+// 中文词查不到时前端会退回纯翻译，所以这里失败只返回 Err。
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct DictSense {
+    pub pos: String,
+    pub defs: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct DictEntry {
+    pub word: String,
+    pub phonetic: String,
+    pub senses: Vec<DictSense>,
+    pub example: String,
+}
+
+pub fn lookup(word: &str) -> Result<DictEntry, String> {
+    let w: String = word.trim().chars().take(48).collect();
+    if w.is_empty() {
+        return Err("空".into());
+    }
+    // 只有纯英文词才查词典，中文/日文直接交给翻译
+    if !w.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '\'' || c == ' ') {
+        return Err("不是英文词".into());
+    }
+    let url = format!(
+        "https://api.dictionaryapi.dev/api/v2/entries/en/{}",
+        urlencoding::encode(&w)
+    );
+    let resp = client(8)?.get(&url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let data: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+    parse_dictionary(&data).ok_or_else(|| "没查到这个词".to_string())
+}
+
+pub fn parse_dictionary(data: &serde_json::Value) -> Option<DictEntry> {
+    let first = data.get(0)?;
+    let word = first.get("word")?.as_str()?.to_string();
+    let phonetic = first
+        .get("phonetic")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            first
+                .get("phonetics")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.iter().find_map(|p| p.get("text").and_then(|t| t.as_str())))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+
+    let mut senses = Vec::new();
+    let mut example = String::new();
+    if let Some(meanings) = first.get("meanings").and_then(|v| v.as_array()) {
+        for m in meanings.iter().take(4) {
+            let pos = m.get("partOfSpeech").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut defs = Vec::new();
+            if let Some(items) = m.get("definitions").and_then(|v| v.as_array()) {
+                for d in items.iter().take(3) {
+                    if let Some(text) = d.get("definition").and_then(|v| v.as_str()) {
+                        defs.push(text.to_string());
+                    }
+                    if example.is_empty() {
+                        if let Some(ex) = d.get("example").and_then(|v| v.as_str()) {
+                            example = ex.to_string();
+                        }
+                    }
+                }
+            }
+            if !defs.is_empty() {
+                senses.push(DictSense { pos, defs });
+            }
+            if senses.len() >= 3 {
+                break;
+            }
+        }
+    }
+    if senses.is_empty() {
+        return None;
+    }
+    Some(DictEntry { word, phonetic, senses, example })
+}

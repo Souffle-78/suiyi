@@ -54,6 +54,68 @@ fn bubble_state() -> Option<BubblePayload> {
 }
 
 #[tauri::command]
+fn close_main_window(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+}
+
+#[derive(serde::Serialize)]
+struct TranslateOut {
+    source: String,
+    text: String,
+    detected: String,
+    target: String,
+    provider: String,
+}
+
+/// 主窗口里的「翻译」按钮：同步走一遍翻译链路（在阻塞线程里跑，别卡 UI）。
+#[tauri::command]
+async fn translate_text(
+    text: String,
+    target: Option<String>,
+    provider: Option<String>,
+) -> Result<TranslateOut, String> {
+    let mut cfg = config::load();
+    if let Some(t) = target.as_ref().filter(|t| !t.is_empty()) {
+        cfg.target = t.clone();
+    }
+    if let Some(p) = provider.as_ref().filter(|p| !p.is_empty()) {
+        cfg.provider = p.clone();
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("empty".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || translate::run(&text, &cfg))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|t| {
+            history::record(&t);
+            TranslateOut {
+                source: t.source,
+                text: t.text,
+                detected: t.detected,
+                target: t.target,
+                provider: t.provider,
+            }
+        })
+}
+
+/// 查词（英文单词）。失败时前端只显示翻译，不当成错误。
+#[tauri::command]
+async fn lookup_word(word: String) -> Result<translate::DictEntry, String> {
+    tauri::async_runtime::spawn_blocking(move || translate::lookup(&word))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn js_log(message: String) {
+    log::line(format!("[js] {message}"));
+}
+
+#[tauri::command]
 fn list_history(limit: usize) -> Vec<history::Entry> {
     history::list(limit)
 }
@@ -126,8 +188,18 @@ fn show_permission_window(app: &AppHandle) {
     }
 }
 
+/// 打开主窗口（翻译 / 生词本 / 历史 / 设置 四个页签共用一个窗口）
+fn open_app(app: &AppHandle, tab: &str) {
+    open_window(app, "main");
+    if let Some(win) = app.get_webview_window("main") {
+        let tab = tab.to_string();
+        // 事件通道在隐藏→显示那一瞬间不可靠，直接 eval 切页签
+        let _ = win.eval(format!("window.__switchTab && window.__switchTab({})", serde_json::to_string(&tab).unwrap_or_else(|_| "\"translate\"".into())));
+    }
+}
+
 fn open_settings_window(app: &AppHandle) {
-    open_window(app, "settings");
+    open_app(app, "translate");
 }
 
 /// 用户主动打开应用（双击图标 / 再次启动 / Reopen）时应看到什么：
@@ -170,7 +242,7 @@ fn cursor_physical(app: &AppHandle, lx: i32, ly: i32) -> (i32, i32) {
 /// 松开鼠标的点是否落在我们自己的窗口里（那样不该把它当成「划词」）
 fn inside_own_window(app: &AppHandle, lx: i32, ly: i32) -> bool {
     let (px, py) = cursor_physical(app, lx, ly);
-    for label in ["bubble", "settings", "history", "permission"] {
+    for label in ["bubble", "main", "permission"] {
         let Some(win) = app.get_webview_window(label) else { continue };
         if !win.is_visible().unwrap_or(false) {
             continue;
@@ -304,6 +376,18 @@ fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
         *guard = Some(payload.clone());
     }
     let _ = win.set_position(PhysicalPosition::new(px, py));
+    // 事件通道偶发丢包（隐藏窗口刚 show 时 webview 还没挂好监听），
+    // 这里直接 eval 调用页面里的全局渲染函数，保证一定能画出来。
+    match serde_json::to_string(&payload) {
+        Ok(json) => {
+            let js = format!("window.__suiyiRender && window.__suiyiRender({json})");
+            match win.eval(&js) {
+                Ok(()) => {}
+                Err(e) => log::line(format!("bubble eval failed: {e}")),
+            }
+        }
+        Err(e) => log::line(format!("bubble payload encode failed: {e}")),
+    }
     let _ = win.emit("suiyi://payload", payload);
     let _ = win.show();
     let gen = SHOW_GEN.fetch_add(1, Ordering::SeqCst) + 1;
@@ -687,8 +771,8 @@ fn main() {
                 .on_menu_event(move |_app, event| match event.id.as_ref() {
                     "quit" => std::process::exit(0),
                     "perm" => permissions::open_settings(),
-                    "settings" => open_settings_window(_app),
-                    "history" => open_window(_app, "history"),
+                    "settings" => open_app(_app, "settings"),
+                    "history" => open_app(_app, "history"),
                     "clip" => match clipboard_text() {
                         Some(text) => translate_given(_app, text),
                         None => { let _ = show_bubble(_app, 600, 300, BubblePayload {
@@ -861,6 +945,10 @@ fn main() {
             get_config,
             set_config,
             bubble_state,
+            js_log,
+            translate_text,
+            lookup_word,
+            close_main_window,
             list_history,
             clear_history,
             add_vocab,
@@ -872,7 +960,7 @@ fn main() {
             set_autostart
         ])
         .on_window_event(|window, event| {
-            if window.label() == "settings" || window.label() == "history" {
+            if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();

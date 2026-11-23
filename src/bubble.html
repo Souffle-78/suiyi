@@ -79,6 +79,7 @@
   let last = null;
 
   function render(p) {
+    log('render loading=' + (p && p.loading) + ' err=' + (p && p.error) + ' len=' + ((p && p.text) || '').length);
     last = p;
     $('src').textContent = (p.source || '').replace(/\s+/g, ' ').slice(0, 90);
     if (p.loading) {
@@ -99,10 +100,16 @@
     $('out').textContent = p.text || '';
   }
 
+  window.__suiyiRender = (p) => { try { render(p); } catch (e) { log('render threw ' + e); } };
+
+  const log = (m) => { try { api && api.core.invoke('js_log', { message: String(m) }); } catch (_) {} };
+  log('boot api=' + !!api + ' hasEvent=' + !!(api && api.event) + ' hasCore=' + !!(api && api.core));
+
   if (api) {
-    api.event.listen('suiyi://payload', (e) => render(e.payload));
+    window.__suiyiRender = (p) => render(p);
+    api.event.listen('suiyi://payload', (e) => { log('event'); render(e.payload); });
     // 窗口刚创建时 emit 可能早于本脚本执行，加载完主动拉一次最新内容
-    api.core.invoke('bubble_state').then((p) => { if (p) render(p); }).catch(() => {});
+    api.core.invoke('bubble_state').then((p) => { log('state pull ' + !!p); if (p) render(p); }).catch((e) => log('state pull failed ' + e));
     $('close').onclick = () => api.window.getCurrentWindow().hide();
     $('save').onclick = async () => {
       if (!last || !last.source || !last.text) return;
