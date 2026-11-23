@@ -5,6 +5,7 @@
 ### 修复
 - Windows 打包失败：`bundle.icon` 少了 `.ico`（Windows 打包器必需），已补齐 png/icns/ico 全套。
 - 去掉 `bundle.targets` 的硬编码（之前写死 `app,dmg`，Windows/Linux 打包被它带偏），改由 `--bundles` 或平台默认决定。
+- Windows 只打 NSIS 安装包（`.exe`）：MSI(WiX) 的代码页 1252 装不下中文产品名，暂不使用。
 
 ## 0.3.3
 
