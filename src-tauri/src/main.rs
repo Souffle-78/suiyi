@@ -129,6 +129,19 @@ fn open_settings_window(app: &AppHandle) {
     open_window(app, "settings");
 }
 
+/// 用户主动打开应用（双击图标 / 再次启动 / Reopen）时应看到什么：
+/// 权限没给全就弹权限窗口，否则弹设置窗口。之前没有这个入口，应用只能靠菜单栏图标操作，
+/// 用户会以为「打不开、卡死在后台」。
+fn open_from_user(app: &AppHandle) {
+    let trusted = permissions::is_trusted();
+    let listening = permissions::input_monitoring();
+    if !trusted || listening == Some(false) {
+        show_permission_window(app);
+    } else {
+        open_settings_window(app);
+    }
+}
+
 struct Shared {
     enabled: AtomicBool,
     last: Mutex<String>,
@@ -592,9 +605,12 @@ fn main() {
     let shared_setup = shared.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            open_from_user(app);
+        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec!["--autostart"]),
         ))
         .setup(move |app| {
             // 自检：SUIYI_PROBE=autostart ./suiyi
@@ -608,8 +624,13 @@ fn main() {
                 println!("final  -> {:?}", manager.is_enabled());
                 return Ok(());
             }
+            // 之前这里设成 Accessory（无 Dock 图标），菜单栏图标一隐藏，用户就完全找不到入口，
+            // 表现成「打不开、卡在后台」。改成普通应用：有 Dock 图标，关窗口只是隐藏。
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
+
+            // 自动登录启动时不弹窗，手动打开时直接把设置窗口摆出来
+            let launched_by_autostart = std::env::args().any(|a| a == "--autostart" || a == "--hidden");
 
             let handle = app.handle().clone();
             let tray_handle = handle.clone();
@@ -626,13 +647,19 @@ fn main() {
                 &[&toggle, &clip_item, &settings_item, &history_item, &perm, &quit],
             )?;
 
+            // 菜单栏图标必须看得见：bundle 图标偶尔取不到（default_window_icon 为 None 时
+            // NSStatusItem 会变成一条看不见的空白），所以额外挂文字标题兜底。
             let mut tray = TrayIconBuilder::new().tooltip("随译 · 选中即翻译");
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
+            match app.default_window_icon() {
+                Some(icon) => {
+                    log::line(format!("tray icon from bundle: {}x{}", icon.width(), icon.height()));
+                    tray = tray.icon(icon.clone());
+                }
+                None => log::line("tray icon missing — relying on the title label"),
             }
-            tray
+            let tray_icon = tray
                 .menu(&menu)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(true)
                 .on_menu_event(move |_app, event| match event.id.as_ref() {
                     "quit" => std::process::exit(0),
                     "perm" => permissions::open_settings(),
@@ -657,7 +684,7 @@ fn main() {
                     }
                     _ => {}
                 })
-                .on_tray_icon_event(move |_tray, event| {
+                .on_tray_icon_event(move |tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
@@ -672,6 +699,22 @@ fn main() {
                     }
                 })
                 .build(app)?;
+            // TrayIcon 是引用计数的：不托管给 app 的话，函数一返回就 Drop，菜单栏图标随即消失
+            // （这正是「看不见图标、以为应用卡在后台」的原因）。
+            {
+                // 菜单栏项在 macOS 26 上可能要 ~1s 才布局完成，也可能被系统收进「≪」折叠区，
+                // 记一次位置方便排查「图标看不见」。
+                let probe = tray_icon.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(900));
+                    match probe.rect() {
+                        Ok(Some(r)) => log::line(format!("tray rect: {:?} {:?}", r.position, r.size)),
+                        Ok(None) => log::line("tray rect: none (系统折叠了菜单栏项)"),
+                        Err(e) => log::line(format!("tray rect err: {e}")),
+                    }
+                });
+            }
+            app.manage(tray_icon);
 
             let trusted_now = permissions::is_trusted();
             let listening_now = permissions::input_monitoring();
@@ -736,6 +779,9 @@ fn main() {
                     thread::sleep(Duration::from_millis(400));
                     show_permission_window(&app_perm);
                 });
+            } else if !launched_by_autostart {
+                // 手动打开：必须看得见东西。以前这里什么都不做，窗口全是 hidden，用户以为没启动
+                open_from_user(&handle);
             }
 
             let app_hello = handle.clone();
@@ -806,17 +852,17 @@ fn main() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
-                    #[cfg(target_os = "macos")]
-                    {
-                        let _ = window
-                            .app_handle()
-                            .set_activation_policy(tauri::ActivationPolicy::Accessory);
-                    }
+                    // 保持 Dock 图标：用户随时点回来都能再打开设置
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Reopen { .. } = event {
+                open_from_user(app_handle);
+            }
+        });
 }
 
 #[cfg(test)]

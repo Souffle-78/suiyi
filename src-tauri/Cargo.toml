@@ -1,6 +1,6 @@
 [package]
 name = "suiyi"
-version = "0.3.4"
+version = "0.3.5"
 description = "随译 — 全局划词翻译"
 edition = "2021"
 rust-version = "1.77"
@@ -20,6 +20,7 @@ arboard = "3"
 enigo = "0.2"
 dirs = "5"
 tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 
 [profile.release]
 codegen-units = 1
