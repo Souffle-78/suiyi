@@ -61,11 +61,8 @@ jobs:
 
       # macOS runner 上没有我们的自签证书，用 CI 配置把 signingIdentity 关掉
       - name: build
-        run: |
-          npx tauri build \
-            ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }} \
-            --bundles ${{ matrix.bundles }} \
-            --config src-tauri/tauri.ci.conf.json
+        shell: bash
+        run: npx tauri build ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.ci.conf.json
 
       - name: list bundles
         shell: bash
