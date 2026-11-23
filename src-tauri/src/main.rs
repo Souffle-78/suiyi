@@ -859,9 +859,13 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // RunEvent::Reopen 只在 macOS 存在，别的平台必须编译掉
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 open_from_user(app_handle);
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event);
         });
 }
 
