@@ -1,11 +1,11 @@
 {
   "name": "suiyi-desktop",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.3.2",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "bash scripts/build.sh",
     "icon": "tauri icon src-tauri/icons/source.png"
   },
   "devDependencies": {

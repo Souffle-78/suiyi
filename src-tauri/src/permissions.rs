@@ -74,6 +74,17 @@ pub fn request() {}
 #[cfg(not(target_os = "macos"))]
 pub fn open_settings() {}
 
+/// 直接跳到「输入监控」那一栏（辅助功能与它是两个开关）
+#[cfg(target_os = "macos")]
+pub fn open_input_monitoring() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_input_monitoring() {}
+
 /// 输入监控（监听全局鼠标/键盘事件）是否已授权。
 /// 辅助功能（AXIsProcessTrusted）只覆盖「发送」事件，监听还需要这一项。
 #[cfg(target_os = "macos")]

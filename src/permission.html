@@ -78,7 +78,8 @@
     </div>
 
     <div class="row">
-      <button class="primary" id="open">打开系统设置</button>
+      <button class="primary" id="open">打开「辅助功能」</button>
+      <button id="openInput">打开「输入监控」</button>
       <button id="recheck">我开好了，重新检测</button>
       <button id="later">稍后</button>
       <span id="status"></span>
@@ -102,14 +103,26 @@
         }
       });
 
+      document.getElementById('openInput').addEventListener('click', async () => {
+        try {
+          await api.core.invoke('open_input_settings');
+          setStatus('已打开「输入监控」');
+        } catch (err) {
+          setStatus('打开失败：' + err);
+        }
+      });
+
       document.getElementById('recheck').addEventListener('click', async () => {
         try {
-          const ok = await api.core.invoke('check_permission');
-          if (ok) {
+          const st = await api.core.invoke('permission_state');
+          const listening = st.inputMonitoring === null ? true : !!st.inputMonitoring;
+          if (st.accessibility && listening) {
             setStatus('权限已就绪 ✓', true);
             setTimeout(() => api.core.invoke('close_permission_window'), 600);
+          } else if (!st.accessibility) {
+            setStatus('还差「辅助功能」');
           } else {
-            setStatus('还没检测到，请确认两个开关都打开了');
+            setStatus('还差「输入监控」——这一步不加，划词不会有反应');
           }
         } catch (err) {
           setStatus('检测失败：' + err);
@@ -120,10 +133,15 @@
         api.core.invoke('close_permission_window');
       });
 
-      // 每秒自动检测一次，开好权限这个窗口会自己消失
+      // 每秒自动检测一次，两个开关都开好这个窗口才会自己消失
+      let closed = false;
       setInterval(async () => {
+        if (closed) return;
         try {
-          if (await api.core.invoke('check_permission')) {
+          const st = await api.core.invoke('permission_state');
+          const listening = st.inputMonitoring === null ? true : !!st.inputMonitoring;
+          if (st.accessibility && listening) {
+            closed = true;
             setStatus('权限已就绪 ✓', true);
             setTimeout(() => api.core.invoke('close_permission_window'), 600);
           }

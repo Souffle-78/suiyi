@@ -9,6 +9,7 @@
 set -euo pipefail
 APP="${1:-src-tauri/target/release/bundle/macos/随译.app}"
 KC="${SUIYI_KEYCHAIN:-$HOME/Library/Keychains/suiyi-signing.keychain-db}"
+security unlock-keychain -p "${SUIYI_KC_PASS:-suiyi-build}" "$KC"
 codesign --force --deep --sign "Suiyi Dev" --keychain "$KC" "$APP"
 codesign -d -r- "$APP" 2>&1 | grep designated
 echo "signed: $APP"

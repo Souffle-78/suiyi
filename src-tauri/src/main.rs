@@ -467,6 +467,19 @@ fn check_permission() -> bool {
 }
 
 #[tauri::command]
+fn open_input_settings() {
+    permissions::open_input_monitoring();
+}
+
+#[tauri::command]
+fn permission_state() -> serde_json::Value {
+    serde_json::json!({
+        "accessibility": permissions::is_trusted(),
+        "inputMonitoring": permissions::input_monitoring(),
+    })
+}
+
+#[tauri::command]
 fn close_permission_window(app: AppHandle) {
     if let Some(win) = app.get_webview_window("permission") {
         let _ = win.hide();
@@ -661,9 +674,13 @@ fn main() {
                 .build(app)?;
 
             let trusted_now = permissions::is_trusted();
+            let listening_now = permissions::input_monitoring();
             if !trusted_now {
                 log::line("accessibility permission missing — asking");
                 permissions::request();
+            } else if listening_now == Some(false) {
+                log::line("input monitoring missing — 鼠标监听需要它，请在 系统设置 → 隐私与安全性 → 输入监控 里勾选随译");
+                show_permission_window(&handle);
             }
 
             log::line(format!(
@@ -681,7 +698,9 @@ fn main() {
             let watch_shared = shared_setup.clone();
             thread::spawn(move || loop {
                 thread::sleep(Duration::from_millis(1500));
-                if permissions::is_trusted() && !HOOK_STARTED.load(Ordering::SeqCst) {
+                let can_listen = permissions::is_trusted()
+                    && permissions::input_monitoring() != Some(false);
+                if can_listen && !HOOK_STARTED.load(Ordering::SeqCst) {
                     log::line("permission granted at runtime — starting hook");
                     ensure_hook(watch_app.clone(), watch_shared.clone());
                     if let Some(win) = watch_app.get_webview_window("permission") {
@@ -765,6 +784,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_permission_settings,
+            open_input_settings,
+            permission_state,
             check_permission,
             close_permission_window,
             get_config,
