@@ -310,7 +310,8 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
                 .unwrap_or(fallback)
         };
 
-        let result = rdev::listen(move |event| match event.event_type {
+        let trace = std::env::var("SUIYI_TRACE").is_ok();
+        let result = rdev::listen(move |event| { if trace { log::line(format!("ev {:?}", event.event_type)); } match event.event_type {
             rdev::EventType::MouseMove { x, y } => {
                 cursor = (x, y);
             }
@@ -439,10 +440,18 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
                 });
             }
             _ => {}
-        });
+        }});
 
         if let Err(e) = result {
-            log::line(format!("input hook failed: {e:?}"));
+            // 监听鼠标需要「输入监控」权限；没有时 CGEventTap 建不起来。
+            // 把 HOOK_STARTED 复位，watchdog 会在用户勾选权限后自动重启钩子（无需重开 App）。
+            HOOK_STARTED.store(false, Ordering::SeqCst);
+            let hint = match permissions::input_monitoring() {
+                Some(false) => "（鼠标监听需要「输入监控」权限，请在 系统设置 → 隐私与安全性 → 输入监控 里勾选随译）",
+                _ => "（稍后自动重试）",
+            };
+            log::line(format!("input hook failed: {e:?} {hint}"));
+            thread::sleep(Duration::from_secs(2));
         }
     });
 }
@@ -658,9 +667,10 @@ fn main() {
             }
 
             log::line(format!(
-                "started · tray icon: {} · trusted: {} · config: {}",
+                "started · tray icon: {} · trusted: {} · input-monitoring: {:?} · config: {}",
                 app.default_window_icon().is_some(),
                 permissions::is_trusted(),
+                crate::permissions::input_monitoring(),
                 config::path().display()
             ));
 

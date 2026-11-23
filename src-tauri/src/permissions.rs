@@ -73,3 +73,21 @@ pub fn request() {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn open_settings() {}
+
+/// 输入监控（监听全局鼠标/键盘事件）是否已授权。
+/// 辅助功能（AXIsProcessTrusted）只覆盖「发送」事件，监听还需要这一项。
+#[cfg(target_os = "macos")]
+pub fn input_monitoring() -> Option<bool> {
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOHIDCheckAccess(request: u32) -> u32;
+    }
+    // kIOHIDRequestTypeListenEvent = 1；0 = granted, 1 = denied, 2 = unknown
+    let status = unsafe { IOHIDCheckAccess(1) };
+    Some(status == 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn input_monitoring() -> Option<bool> {
+    None
+}
