@@ -889,8 +889,10 @@ fn main() {
                     show_permission_window(&app_perm);
                 });
             } else if !launched_by_autostart {
-                // 手动打开：必须看得见东西。以前这里什么都不做，窗口全是 hidden，用户以为没启动
-                open_from_user(&handle);
+                // 手动启动时不再自动弹主窗口：1020×720 的窗口正好压在屏幕中间，
+                // 用户想在别的应用里划词时，选中的区域往往被它挡住，表现成「划词没反应」。
+                // Dock 图标常驻，点一下（Reopen）就能打开主窗口；菜单栏里也有入口。
+                log::line("launched — main window kept closed (Dock icon / menu opens it)");
             }
 
             let app_hello = handle.clone();
