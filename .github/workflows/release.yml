@@ -1,9 +1,12 @@
-name: release
+name: build
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -12,13 +15,14 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
+            target: aarch64-apple-darwin
           - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
+            target: x86_64-apple-darwin
           - platform: ubuntu-22.04
-            args: ""
+            target: ""
           - platform: windows-latest
-            args: ""
+            target: ""
+
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -51,8 +55,18 @@ jobs:
 
       - run: npm install --no-fund --no-audit
 
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # macOS runner 上没有我们的自签证书，用 CI 配置把 signingIdentity 关掉
+      - name: build
+        run: npx tauri build ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }} --config src-tauri/tauri.ci.conf.json
+
+      - uses: actions/upload-artifact@v4
         with:
-          args: ${{ matrix.args }}
+          name: suiyi-${{ matrix.platform }}-${{ matrix.target || 'native' }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.app.tar.gz
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.AppImage
+          if-no-files-found: warn
