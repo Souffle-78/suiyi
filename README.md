@@ -62,6 +62,18 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 - 只有中文界面
 - Linux 仅 X11 可用；Wayland 不允许全局监听，只能退化为快捷键 + 剪贴板
 - macOS 分发需要签名与公证，否则别人首次打开会被 Gatekeeper 拦
+- 本机开发用自签证书固定签名（否则每次重编译「辅助功能 / 输入监控」授权都会失效）：
+  ```bash
+  security create-keychain -p suiyi-build ~/Library/Keychains/suiyi-signing.keychain-db
+  security set-keychain-settings -lut 86400 ~/Library/Keychains/suiyi-signing.keychain-db
+  security import cert.p12 -k ~/Library/Keychains/suiyi-signing.keychain-db -P suiyi \
+    -T /usr/bin/codesign -T /usr/bin/security -A
+  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k suiyi-build \
+    ~/Library/Keychains/suiyi-signing.keychain-db
+  security list-keychains -d user -s ~/Library/Keychains/login.keychain-db \
+    ~/Library/Keychains/suiyi-signing.keychain-db
+  ```
+  之后用 `npm run build`（会先解锁钥匙串再打包，避免 codesign 卡在系统密码弹窗）。
 
 ## 三端支持
 

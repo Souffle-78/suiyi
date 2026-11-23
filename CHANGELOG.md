@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.3.3
+
+### 改进
+- 打包改走 `npm run build`：先自动解锁签名钥匙串，避免 codesign 弹系统密码框（errSecInternalComponent）。
+- README 补上自签证书 + 钥匙串的完整准备命令。
+
 ## 0.3.2
 
 ### 修复
