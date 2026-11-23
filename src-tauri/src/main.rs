@@ -605,8 +605,11 @@ fn close_permission_window(app: AppHandle) {
     if let Some(win) = app.get_webview_window("permission") {
         let _ = win.hide();
     }
-    #[cfg(target_os = "macos")]
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    // 不要退回 Accessory：那会让 Dock 图标消失，用户就找不到入口了。
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
 }
 
 fn main() {
@@ -857,8 +860,6 @@ fn main() {
                     if let Some(win) = watch_app.get_webview_window("permission") {
                         let _ = win.hide();
                     }
-                    #[cfg(target_os = "macos")]
-                    let _ = watch_app.set_activation_policy(tauri::ActivationPolicy::Accessory);
                     show_bubble(
                         &watch_app,
                         700,
