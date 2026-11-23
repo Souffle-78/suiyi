@@ -2,7 +2,7 @@
 
 ![随译主界面](assets/screenshot-app.png)
 
-选中任意应用里的文字，立刻在鼠标旁弹出译文。Windows / macOS / Linux 三端。
+选中任意应用里的文字，立刻在鼠标旁弹出译文。Windows / macOS 双端。
 
 ## 现在能做什么
 
@@ -62,9 +62,8 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 
 ## 已知限制（待办）
 
-- Windows、Linux 的后端（WH_MOUSE_LL / XRecord）还没接
+- Windows 的全局钩子后端（WH_MOUSE_LL）还没接
 - 只有中文界面
-- Linux 仅 X11 可用；Wayland 不允许全局监听，只能退化为快捷键 + 剪贴板
 - macOS 分发需要签名与公证，否则别人首次打开会被 Gatekeeper 拦
 - 本机开发用自签证书固定签名（否则每次重编译「辅助功能 / 输入监控」授权都会失效）：
   ```bash
@@ -85,10 +84,7 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 | --- | --- | --- |
 | macOS 12+ | 模拟 ⌘C（兜底系统辅助功能接口） | 已跑通，需在「辅助功能」里授权 |
 | Windows 10/11 | 模拟 Ctrl+C | 代码同一套，需在 Windows 机器上验证 |
-| Linux X11 | 模拟 Ctrl+C（libxdo） | 代码同一套，需在 X11 桌面验证 |
-| Linux Wayland | 全局钩子受限 | 需要桌面环境提供 portal，暂不支持 |
 
-`rdev` 在 Linux 上依赖 `libx11`/`libxtst`，打包需要 `libwebkit2gtk-4.1-dev`、`libayatana-appindicator3-dev` 等，
 `.github/workflows/release.yml` 里已经把三端的依赖和构建矩阵写好了（打 tag 触发）。
 
 ## 权限要求
@@ -98,12 +94,10 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 - 重新编译覆盖 `/Applications/随译.app` 之后，macOS 可能把它当成新程序：如果授权过却仍无反应，
   去列表里把「随译」删掉（− 号）再重新勾一次。
 - **Windows**：无需额外授权；部分以管理员权限运行的窗口（任务管理器等）需要同权限运行本程序。
-- **Linux**：X11 下无需额外授权；Wayland 需要先切到 X11 会话。
 
 ## 常见问题
 
 - **选中没反应**：先看 `~/Library/Application Support/suiyi/suiyi.log`（Windows: `%APPDATA%\suiyi\suiyi.log`，
-  Linux: `~/.config/suiyi/suiyi.log`），里面有 `skip hook — accessibility not granted` 就是没授权。
 - **译不出来**：设置里换线路试试；Google/Bing 免密钥但有频率限制，长文本建议用 DeepSeek 精翻。
 - **气泡位置怪**：多屏 / 缩放比例不同时会在屏幕边界内夹取，仍可手动拖动（气泡可拖）。
 

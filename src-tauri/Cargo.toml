@@ -1,6 +1,6 @@
 [package]
 name = "suiyi"
-version = "0.4.4"
+version = "0.4.5"
 description = "随译 — 全局划词翻译"
 edition = "2021"
 rust-version = "1.77"

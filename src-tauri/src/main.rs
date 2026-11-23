@@ -272,11 +272,44 @@ fn cursor_physical(app: &AppHandle, lx: i32, ly: i32) -> (i32, i32) {
 }
 
 /// 松开鼠标的点是否落在我们自己的窗口里（那样不该把它当成「划词」）
+/// 这个窗口是不是在「当前屏幕空间」上？主窗口可能停在别的桌面/全屏空间里，
+/// 那种情况下它的矩形还会盖住选区坐标，不能拿它当「点到自己窗口」。
+#[cfg(target_os = "macos")]
+fn on_active_space(win: &tauri::WebviewWindow) -> bool {
+    use std::sync::mpsc;
+    let w = win.clone();
+    let (tx, rx) = mpsc::channel();
+    let handle = win.app_handle().clone();
+    let _ = handle.run_on_main_thread(move || {
+        let res = match w.ns_window() {
+            Ok(ptr) => unsafe {
+                use objc::runtime::Object;
+                use objc::{msg_send, sel, sel_impl};
+                let ns = ptr as *mut Object;
+                let v: bool = msg_send![ns, isOnActiveSpace];
+                v
+            },
+            Err(_) => true,
+        };
+        let _ = tx.send(res);
+    });
+    // 拿不到就当它在当前空间（宁可少触发，也别误判成别处）
+    rx.recv_timeout(std::time::Duration::from_millis(150)).unwrap_or(true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn on_active_space(_win: &tauri::WebviewWindow) -> bool {
+    true
+}
+
 fn inside_own_window(app: &AppHandle, lx: i32, ly: i32) -> bool {
     let (px, py) = cursor_physical(app, lx, ly);
     for label in ["bubble", "main", "permission"] {
         let Some(win) = app.get_webview_window(label) else { continue };
         if !win.is_visible().unwrap_or(false) {
+            continue;
+        }
+        if !on_active_space(&win) {
             continue;
         }
         if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
@@ -285,6 +318,10 @@ fn inside_own_window(app: &AppHandle, lx: i32, ly: i32) -> bool {
                 && py >= pos.y
                 && py <= pos.y + size.height as i32;
             if inside {
+                log::line(format!(
+                    "hit own window {label} at {:?} size {:?} (point {px},{py})",
+                    pos, size
+                ));
                 return true;
             }
         }
@@ -380,23 +417,98 @@ fn translate_given(app: &AppHandle, text: String) {
 
 
 /// 气泡要跟在「当前所在的空间」上：桌面、别的桌面、以及 Safari 这类全屏应用的空间。
-/// macOS 上用 NSWindowCollectionBehaviorCanJoinAllSpaces + FullScreenAuxiliary 才能做到，
-/// 只设 always_on_top 的话，全屏应用的空间里根本看不到这个窗口。
+/// macOS 上用 NSWindowCollectionBehaviorCanJoinAllSpaces + FullScreenAuxiliary + Stationary，
+/// 并把层级提到 NSStatusWindowLevel，才不会被全屏应用盖住。
+///
+/// 注意：所有 AppKit 调用都必须在主线程做。之前直接在 worker 线程 msg_send，
+/// 触发 `NSWMWindowCoordinator performTransactionUsingBlock` 里的 SIGTRAP（EXC_BREAKPOINT）。
 #[cfg(target_os = "macos")]
 fn float_over_every_space(win: &tauri::WebviewWindow) {
-    let _ = win.set_visible_on_all_workspaces(true);
-    match win.ns_window() {
-        Ok(ptr) => unsafe {
-            use objc::runtime::Object;
-            use objc::{msg_send, sel, sel_impl};
-            let ns = ptr as *mut Object;
-            // 1 = CanJoinAllSpaces, 256 = FullScreenAuxiliary
-            let behavior: u64 = (1u64 << 0) | (1u64 << 8);
-            let _: () = msg_send![ns, setCollectionBehavior: behavior];
-            // NSFloatingWindowLevel：压在全屏应用之上
-            let _: () = msg_send![ns, setLevel: 3i64];
-        },
-        Err(e) => log::line(format!("bubble ns_window unavailable: {e}")),
+    let w = win.clone();
+    let handle = win.app_handle().clone();
+    if let Err(e) = handle.run_on_main_thread(move || unsafe {
+        use objc::runtime::Object;
+        use objc::{msg_send, sel, sel_impl};
+
+        // 实验：把窗口类换成 NSPanel（非激活面板），全屏空间里才肯浮出来。
+        // 只在 SUIYI_PANEL_TRICK=1 时启用，验证通过再默认打开。
+        if std::env::var("SUIYI_PANEL_TRICK").as_deref() == Ok("1") {
+            extern "C" {
+                fn objc_getClass(name: *const std::os::raw::c_char) -> *mut std::ffi::c_void;
+                fn object_setClass(
+                    obj: *mut std::ffi::c_void,
+                    cls: *mut std::ffi::c_void,
+                ) -> *mut std::ffi::c_void;
+            }
+            if let Ok(ptr) = w.ns_window() {
+                let name = b"NSPanel\0";
+                unsafe {
+                    let cls = objc_getClass(name.as_ptr() as *const _);
+                    if !cls.is_null() {
+                        object_setClass(ptr, cls);
+                        log::line("bubble switched to NSPanel");
+                    } else {
+                        log::line("NSPanel class not found");
+                    }
+                }
+            }
+        }
+        // 注意：不要用 tao 的 set_visible_on_all_workspaces —— 它会把 collectionBehavior
+        // 覆盖成只有 canJoinAllSpaces，丢掉 fullScreenAuxiliary，全屏空间里就看不见了。
+        let _ = &w;
+        match w.ns_window() {
+            Ok(ptr) => {
+                let ns = ptr as *mut Object;
+                // 1 = CanJoinAllSpaces, 16 = Stationary, 256 = FullScreenAuxiliary
+                let behavior: u64 = (1u64 << 0) | (1u64 << 4) | (1u64 << 8);
+                let _: () = msg_send![ns, setCollectionBehavior: behavior];
+                // 默认 NSPopUpMenuWindowLevel(101)：全屏应用之上要浮得住
+                let level: i64 = std::env::var("SUIYI_BUBBLE_LEVEL")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(101);
+                let _: () = msg_send![ns, setLevel: level];
+                // 别人全屏时不要自己隐藏
+                let _: () = msg_send![ns, setHidesOnDeactivate: false];
+                // 主线程上调 order front（修掉之前 worker 线程 msg_send 的 SIGTRAP）
+                let _: () = msg_send![ns, orderFrontRegardless];
+                let got_behavior: u64 = msg_send![ns, collectionBehavior];
+                let got_level: i64 = msg_send![ns, level];
+                let on_space: bool = msg_send![ns, isOnActiveSpace];
+                log::line(format!(
+                    "bubble overlay: behavior=0x{got_behavior:x} level={got_level} onActiveSpace={on_space}"
+                ));
+                // 1 秒后再看一次：tao/Tauri 有时会在 show 之后异步把 collectionBehavior 改回去
+                let w2 = w.clone();
+                let h2 = w.app_handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    let _ = h2.run_on_main_thread(move || unsafe {
+                        use objc::runtime::Object;
+                        use objc::{msg_send, sel, sel_impl};
+                        if let Ok(ptr) = w2.ns_window() {
+                            let ns = ptr as *mut Object;
+                            let b: u64 = msg_send![ns, collectionBehavior];
+                            let l: i64 = msg_send![ns, level];
+                            let a: bool = msg_send![ns, isOnActiveSpace];
+                            let v: bool = msg_send![ns, isVisible];
+                            log::line(format!(
+                                "bubble overlay +1s: behavior=0x{b:x} level={l} onActiveSpace={a} visible={v}"
+                            ));
+                            let want: u64 = (1u64 << 0) | (1u64 << 4) | (1u64 << 8);
+                            if b != want {
+                                let _: () = msg_send![ns, setCollectionBehavior: want];
+                                let _: () = msg_send![ns, orderFrontRegardless];
+                                log::line("bubble overlay re-applied");
+                            }
+                        }
+                    });
+                });
+            }
+            Err(e) => log::line(format!("bubble ns_window unavailable: {e}")),
+        }
+    }) {
+        log::line(format!("bubble overlay dispatch failed: {e}"));
     }
 }
 
@@ -404,9 +516,35 @@ fn float_over_every_space(win: &tauri::WebviewWindow) {
 fn float_over_every_space(_win: &tauri::WebviewWindow) {}
 
 fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
+    // 实验：按需新建窗口。旧窗口固化在它创建时所在的空间，切到全屏空间后
+    // canJoinAllSpaces 也不一定把它挪过来；新建的窗口会落在当前活动空间。
+    if std::env::var("SUIYI_FRESH_BUBBLE").as_deref() == Ok("1") {
+        if let Some(old) = app.get_webview_window("bubble") {
+            let _ = old.destroy();
+        }
+        if let Ok(w) = tauri::WebviewWindowBuilder::new(app, "bubble", tauri::WebviewUrl::App("bubble.html".into()))
+            .inner_size(380.0, 200.0)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .visible(false)
+            .build()
+        {
+            log::line("fresh bubble window built");
+            return show_bubble_in(app, &w, x, y, payload);
+        }
+        log::line("fresh bubble build failed");
+    }
     let Some(win) = app.get_webview_window("bubble") else {
         return 0;
     };
+    show_bubble_in(app, &win, x, y, payload)
+}
+
+fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, payload: BubblePayload) -> u64 {
+    let win = win.clone();
     float_over_every_space(&win);
     let width = 380.0;
     let height = if payload.loading { 120.0 } else { 200.0 };
@@ -448,6 +586,8 @@ fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
     }
     let _ = win.emit("suiyi://payload", payload);
     let _ = win.show();
+    // show() 之后 tao 可能又把层级/行为改回去，这里再确认一次（主线程、只置前不抢焦点）
+    float_over_every_space(&win);
     let gen = SHOW_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     gen
 }
@@ -756,7 +896,7 @@ fn main() {
             }
             return;
         }
-        if mode != "autostart" && mode != "bubble" {
+        if mode != "autostart" && mode != "bubble" && mode != "bubbleshow" {
             let cfg = config::load();
             println!("provider={} target={}", cfg.provider, cfg.target);
             match translate::run("Hello world, this is a quick probe.", &cfg) {
@@ -802,7 +942,26 @@ fn main() {
 
             if let Some(bubble) = app.get_webview_window("bubble") {
                 float_over_every_space(&bubble);
-                if std::env::var("SUIYI_PROBE").as_deref() == Ok("bubble") {
+                if std::env::var("SUIYI_PROBE").as_deref() == Ok("bubbleshow") {
+                    let h = app.handle().clone();
+                    std::thread::spawn(move || {
+                        let mut n = 0;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(5));
+                            n += 1;
+                            let _ = show_bubble(&h, 700, 400, BubblePayload {
+                                source: "自检".into(),
+                                text: format!("probe #{n}"),
+                                detected: "en".into(),
+                                target: "zh-CN".into(),
+                                provider: "probe".into(),
+                                loading: false,
+                                error: None,
+                            });
+                            log::line(format!("probe bubble #{n} shown"));
+                        }
+                    });
+                } else if std::env::var("SUIYI_PROBE").as_deref() == Ok("bubble") {
                     #[cfg(target_os = "macos")]
                     unsafe {
                         use objc::runtime::Object;
@@ -823,7 +982,15 @@ fn main() {
             }
 
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Regular);
+            {
+                let policy = std::env::var("SUIYI_POLICY").unwrap_or_default();
+                if policy == "accessory" {
+                    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    log::line("activation policy forced to accessory (probe)");
+                } else {
+                    app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                }
+            }
 
             // 自动登录启动时不弹窗，手动打开时直接把设置窗口摆出来
             let launched_by_autostart = std::env::args().any(|a| a == "--autostart" || a == "--hidden");
