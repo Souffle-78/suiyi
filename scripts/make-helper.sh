@@ -35,6 +35,9 @@ if [[ -x "$OUT" && "$OUT" -nt "$SRC" ]]; then
   exit 0
 fi
 
-"$SWIFTC" -O -o "$OUT" "$SRC" 2>&1 | grep -v "warning:" || true
+"$SWIFTC" -O -target arm64-apple-macos13.0 -o "$OUT_DIR/arm64" "$SRC" 2>&1 | grep -v "warning:" || true
+"$SWIFTC" -O -target x86_64-apple-macos13.0 -o "$OUT_DIR/x86_64" "$SRC" 2>&1 | grep -v "warning:" || true
+lipo -create -output "$OUT" "$OUT_DIR/arm64" "$OUT_DIR/x86_64"
+rm -f "$OUT_DIR/arm64" "$OUT_DIR/x86_64"
 chmod +x "$OUT"
 echo "make-helper: built $OUT ($(du -h "$OUT" | cut -f1))"
