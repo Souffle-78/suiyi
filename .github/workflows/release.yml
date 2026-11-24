@@ -42,6 +42,12 @@ jobs:
 
       - run: npm install --no-fund --no-audit
 
+      # macOS：先把气泡助手的 NSPanel 二进制编出来（bundle.resources 会把它塞进 App）
+      - name: build bubble helper
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/make-helper.sh
+
       # macOS runner 上没有我们的自签证书，用 CI 配置把 signingIdentity 关掉
       - name: build
         shell: bash

@@ -4,8 +4,7 @@
   "version": "0.5.0",
   "identifier": "com.souffle.suiyi",
   "build": {
-    "frontendDist": "../src",
-    "beforeBundleCommand": "/bin/bash -c 'bash scripts/make-helper.sh 2>/dev/null || bash ../scripts/make-helper.sh'"
+    "frontendDist": "../src"
   },
   "app": {
     "withGlobalTauri": true,
@@ -71,9 +70,6 @@
     "longDescription": "选中任意应用里的文字，立刻弹出译文。默认免费线路，可选 DeepSeek 精翻与术语表。",
     "macOS": {
       "signingIdentity": "Suiyi Dev"
-    },
-    "resources": [
-      "helper/bin/suiyi-helper"
-    ]
+    }
   }
 }

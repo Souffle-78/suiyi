@@ -7,4 +7,5 @@ PASS="${SUIYI_KC_PASS:-suiyi-build}"
 if [ -f "$KC" ]; then
   security unlock-keychain -p "$PASS" "$KC" >/dev/null 2>&1 || echo "警告：解锁钥匙串失败，签名可能失败" >&2
 fi
+bash "$(dirname "$0")/make-helper.sh"
 exec npx tauri build "$@"
