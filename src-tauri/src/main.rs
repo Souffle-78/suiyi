@@ -18,6 +18,7 @@ mod hook;
 mod log;
 mod permissions;
 mod translate;
+mod translate_flow;
 mod vocab;
 
 #[derive(Serialize, Clone)]
@@ -377,6 +378,13 @@ fn clipboard_text() -> Option<String> {
 
 /// 在鼠标附近翻译一段给定文本（不依赖划词）
 fn translate_given(app: &AppHandle, text: String) {
+    // macOS 助手可用时走新流程（小图标/可编辑面板都在助手那边）；
+    // 其它平台继续用 webview 气泡。
+    #[cfg(target_os = "macos")]
+    if crate::bubble_helper::ensure_running() {
+        crate::translate_flow::translate_at_cursor(app, &text);
+        return;
+    }
     let (lx, ly) = last_cursor();
     show_bubble(app, lx, ly, BubblePayload {
         source: text.chars().take(90).collect(),
@@ -393,7 +401,7 @@ fn translate_given(app: &AppHandle, text: String) {
         match translate::run(&text, &cfg) {
             Ok(t) => {
                 history::record(&t);
-                let _ = show_bubble(&app, lx, ly, BubblePayload {
+                show_bubble(&app, lx, ly, BubblePayload {
                     source: t.source.chars().take(90).collect(),
                     text: t.text.clone(),
                     detected: t.detected.clone(),
@@ -403,15 +411,17 @@ fn translate_given(app: &AppHandle, text: String) {
                     error: None,
                 });
             }
-            Err(e) => { let _ = show_bubble(&app, lx, ly, BubblePayload {
-                source: text.chars().take(90).collect(),
-                text: String::new(),
-                detected: String::new(),
-                target: String::new(),
-                provider: String::new(),
-                loading: false,
-                error: Some(e),
-            }); }
+            Err(e) => {
+                show_bubble(&app, lx, ly, BubblePayload {
+                    source: text.chars().take(90).collect(),
+                    text: String::new(),
+                    detected: String::new(),
+                    target: String::new(),
+                    provider: String::new(),
+                    loading: false,
+                    error: Some(e),
+                });
+            }
         }
     });
 }
@@ -603,28 +613,12 @@ unsafe fn overlay_panel(win: &tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i
 fn float_over_every_space(_win: &tauri::WebviewWindow) {}
 
 fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
-    // macOS：气泡交给独立的 NSPanel 助手，才能盖在别的 App 的全屏空间上。
-    // 助手不可用（没编译 / 非 macOS）时继续走下面的 webview 气泡。
+    // macOS：气泡完全交给 NSPanel 助手（它才能盖在别的 App 的全屏空间上）。
+    // webview 气泡在 macOS 上已经退役——只在助手不可用时兜底，避免出现两个气泡。
     #[cfg(target_os = "macos")]
-    {
-        let title = if payload.loading {
-            "翻译中".to_string()
-        } else if payload.detected.is_empty() {
-            "随译".to_string()
-        } else {
-            format!("{} → {} · {}", payload.detected, payload.target, payload.provider)
-        };
-        if bubble_helper::show(
-            title,
-            payload.source.clone(),
-            payload.text.clone(),
-            payload.loading,
-            payload.error.clone(),
-            x as f64,
-            y as f64,
-        ) {
-            return SHOW_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-        }
+    if bubble_helper::ensure_running() {
+        let _ = (x, y, &payload);
+        return 0;
     }
     let _ = app;
     // 实验：按需新建窗口。旧窗口固化在它创建时所在的空间，切到全屏空间后
@@ -833,6 +827,12 @@ fn on_release(
             }
             *last = text.clone();
             *last_at = Instant::now();
+        }
+        // macOS：先只在选区旁冒一个小图标；点它 / 悬停才真正翻译（有道的手感）。
+        #[cfg(target_os = "macos")]
+        if crate::bubble_helper::show_icon(&text, x, y) {
+            log::line(format!("bubble icon shown ({} chars)", text.chars().count()));
+            return;
         }
         let cfg = config::load();
         show_bubble(
@@ -1067,9 +1067,12 @@ fn main() {
             // 表现成「打不开、卡在后台」。改成普通应用：有 Dock 图标，关窗口只是隐藏。
             // 命令里用 State<Arc<Shared>> 读开关状态，必须先托管
             app.manage(shared_setup.clone());
-            bubble_helper::start_action_watcher();
+            bubble_helper::start_action_watcher(app.handle().clone());
             bubble_helper::ensure_running();
 
+            // macOS 上 webview 气泡已退役（改用助手进程），这里不再给它设置浮层行为，
+            // 否则那套「+1s 重新应用 + orderFrontRegardless」会把隐藏的气泡窗口顶上来。
+            #[cfg(not(target_os = "macos"))]
             if let Some(bubble) = app.get_webview_window("bubble") {
                 float_over_every_space(&bubble);
                 if std::env::var("SUIYI_PROBE").as_deref() == Ok("bubbleshow") {
@@ -1309,22 +1312,40 @@ fn main() {
                     }
                     _ => (700, 120),
                 };
-                show_bubble(
-                    &app_hello,
-                    lx,
-                    ly,
-                    BubblePayload {
-                        source: "随译已启动".into(),
-                        text: format!(
-                            "选中任意应用里的文字、松开鼠标，就会在这里弹出译文。\n快捷键不需要记；想调语言、线路或术语表，去菜单栏的「随译」菜单。"
-                        ),
-                        detected: "suiyi".into(),
-                        target: version.into(),
-                        provider: "local".into(),
-                        loading: false,
-                        error: None,
-                    },
-                );
+                let hello_text = "选中任意应用里的文字、松开鼠标，就会在选区旁边先冒出一个小图标；\n点它（或悬停一下）才展开译文。单词会额外显示音标和词性释义。\n想调语言、线路或术语表，去菜单栏的「随译」菜单。".to_string();
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = bubble_helper::show_panel(
+                        format!("suiyi → {version} · local"),
+                        "随译已启动".into(),
+                        hello_text.clone(),
+                        false,
+                        None,
+                        "sentence".into(),
+                        String::new(),
+                        Vec::new(),
+                        lx as f64,
+                        ly as f64,
+                    );
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    show_bubble(
+                        &app_hello,
+                        lx,
+                        ly,
+                        BubblePayload {
+                            source: "随译已启动".into(),
+                            text: hello_text,
+                            detected: "suiyi".into(),
+                            target: version.into(),
+                            provider: "local".into(),
+                            loading: false,
+                            error: None,
+                        },
+                    );
+                }
+                let _ = &app_hello;
                 cfg.hello_version = version.to_string();
                 let _ = config::save(&cfg);
             });
