@@ -639,7 +639,7 @@ $('openInput').addEventListener('click', () => invoke('open_input_settings'));
 // ---------- 启动 ----------
 (async () => {
   await loadSettings();
-  $('ver').textContent = '0.4.5';
+  $('ver').textContent = '0.5.0';
   updateCount();
   const tab = new URLSearchParams(location.search).get('tab');
   switchTab(tab || 'translate');

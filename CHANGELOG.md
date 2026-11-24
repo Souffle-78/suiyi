@@ -1,5 +1,19 @@
 # 更新日志
 
+## 0.5.0
+
+### 新增
+- **气泡能在全屏应用上显示了**（Safari、预览等进入全屏空间时也能划词翻译）。
+  做法：气泡改由一个常驻的 macOS 助手进程画——它是 accessory 应用（无 Dock 图标），
+  窗口是创建时就带 `.nonactivatingPanel` 的 `NSPanel`，`collectionBehavior =
+  canJoinAllSpaces | stationary | fullScreenAuxiliary`、`level = 101`。
+  普通 NSWindow 事后改这些属性在 macOS 26 上无效（`isOnActiveSpace` 恒为 false），所以必须拆进程。
+- 气泡按钮可直接「复制译文 / 存生词 / 关闭」，复制不需要再回主界面。
+- 主程序退出时助手一起退出；助手被系统回收会在下次划词时自动拉起。
+
+### 说明
+- Windows / Linux 仍使用原来的 webview 气泡（那两个平台没有这个限制）。
+
 ## 0.4.5
 
 ### 变更

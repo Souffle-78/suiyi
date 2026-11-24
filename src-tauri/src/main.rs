@@ -10,6 +10,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::menu::MenuItemKind;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
+mod bubble_helper;
 mod capture;
 mod config;
 mod history;
@@ -472,6 +473,12 @@ fn float_over_every_space(win: &tauri::WebviewWindow) {
                 let _: () = msg_send![ns, setHidesOnDeactivate: false];
                 // 主线程上调 order front（修掉之前 worker 线程 msg_send 的 SIGTRAP）
                 let _: () = msg_send![ns, orderFrontRegardless];
+                if std::env::var("SUIYI_ACTIVATE").as_deref() == Ok("1") {
+                    let nsapp: *mut Object = msg_send![objc::class!(NSApplication), sharedApplication];
+                    let _: () = msg_send![nsapp, activateIgnoringOtherApps: true];
+                    let _: () = msg_send![ns, makeKeyAndOrderFront: std::ptr::null_mut::<Object>()];
+                    log::line("bubble: NSApp activated + makeKeyAndOrderFront");
+                }
                 let got_behavior: u64 = msg_send![ns, collectionBehavior];
                 let got_level: i64 = msg_send![ns, level];
                 let on_space: bool = msg_send![ns, isOnActiveSpace];
@@ -512,10 +519,114 @@ fn float_over_every_space(win: &tauri::WebviewWindow) {
     }
 }
 
+
+#[cfg(target_os = "macos")]
+static OVERLAY_PANEL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 把气泡的 contentView 搬进一个真正的 NSPanel。
+/// 有道/欧路这类划词工具能盖在全屏应用上，靠的就是「非激活面板 + 跨空间」这两个属性，
+/// 而这些属性必须在窗口**创建时**由 styleMask 决定，普通 NSWindow 事后改 collectionBehavior 不够。
+#[cfg(target_os = "macos")]
+unsafe fn overlay_panel(win: &tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i32) -> bool {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    #[repr(C)]
+    struct Pt {
+        x: f64,
+        y: f64,
+    }
+    #[repr(C)]
+    struct Sz {
+        w: f64,
+        h: f64,
+    }
+    #[repr(C)]
+    struct Rc {
+        origin: Pt,
+        size: Sz,
+    }
+    let Ok(ptr) = win.ns_window() else {
+        return false;
+    };
+    let ns = ptr as *mut Object;
+    let view: *mut Object = msg_send![ns, contentView];
+    if view.is_null() {
+        return false;
+    }
+    let mut panel = OVERLAY_PANEL.load(std::sync::atomic::Ordering::Relaxed) as *mut Object;
+    if panel.is_null() {
+        let rect = Rc {
+            origin: Pt { x: x as f64, y: y as f64 },
+            size: Sz {
+                w: w as f64,
+                h: h as f64,
+            },
+        };
+        // 1<<7 NonactivatingPanel, 1<<0 Borderless
+        let mask: u64 = (1u64 << 7) | 1u64;
+        let alloc: *mut Object = msg_send![class!(NSPanel), alloc];
+        panel = msg_send![alloc, initWithContentRect: rect styleMask: mask backing: 2u64 defer: false];
+        if panel.is_null() {
+            return false;
+        }
+        let _: () = msg_send![panel, setFloatingPanel: true];
+        let _: () = msg_send![panel, setBecomesKeyOnlyIfNeeded: true];
+        let _: () = msg_send![panel, setLevel: 101i64];
+        let _: () = msg_send![panel, setCollectionBehavior: 0x111u64];
+        let _: () = msg_send![panel, setHidesOnDeactivate: false];
+        let _: () = msg_send![panel, setOpaque: false];
+        let clear: *mut Object = msg_send![class!(NSColor), clearColor];
+        let _: () = msg_send![panel, setBackgroundColor: clear];
+        let _: () = msg_send![panel, setContentView: view];
+        OVERLAY_PANEL.store(panel as usize, std::sync::atomic::Ordering::Relaxed);
+        let _ = win.hide();
+        log::line("bubble transplanted into NSPanel");
+        let _: () = msg_send![panel, orderFrontRegardless];
+        return true;
+    }
+    let rect = Rc {
+        origin: Pt { x: x as f64, y: y as f64 },
+        size: Sz {
+            w: w as f64,
+            h: h as f64,
+        },
+    };
+    let _: () = msg_send![panel, setFrame: rect display: true];
+    let _: () = msg_send![panel, orderFrontRegardless];
+    let on_space: bool = msg_send![panel, isOnActiveSpace];
+    let vis: bool = msg_send![panel, isVisible];
+    log::line(format!("overlay panel frame=({x},{y},{w},{h}) onActiveSpace={on_space} visible={vis}"));
+    true
+}
+
 #[cfg(not(target_os = "macos"))]
 fn float_over_every_space(_win: &tauri::WebviewWindow) {}
 
 fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
+    // macOS：气泡交给独立的 NSPanel 助手，才能盖在别的 App 的全屏空间上。
+    // 助手不可用（没编译 / 非 macOS）时继续走下面的 webview 气泡。
+    #[cfg(target_os = "macos")]
+    {
+        let title = if payload.loading {
+            "翻译中".to_string()
+        } else if payload.detected.is_empty() {
+            "随译".to_string()
+        } else {
+            format!("{} → {} · {}", payload.detected, payload.target, payload.provider)
+        };
+        if bubble_helper::show(
+            title,
+            payload.source.clone(),
+            payload.text.clone(),
+            payload.loading,
+            payload.error.clone(),
+            x as f64,
+            y as f64,
+        ) {
+            return SHOW_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        }
+    }
+    let _ = app;
     // 实验：按需新建窗口。旧窗口固化在它创建时所在的空间，切到全屏空间后
     // canJoinAllSpaces 也不一定把它挪过来；新建的窗口会落在当前活动空间。
     if std::env::var("SUIYI_FRESH_BUBBLE").as_deref() == Ok("1") {
@@ -585,6 +696,23 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
         Err(e) => log::line(format!("bubble payload encode failed: {e}")),
     }
     let _ = win.emit("suiyi://payload", payload);
+    #[cfg(target_os = "macos")]
+    if std::env::var("SUIYI_PANEL_TRANSPLANT").as_deref() == Ok("1") {
+        let app2 = app.clone();
+        let w2 = win.clone();
+        let _ = app.run_on_main_thread(move || unsafe {
+            use objc::runtime::Object;
+            use objc::{msg_send, sel, sel_impl};
+            if let Ok(ptr) = w2.ns_window() {
+                let ns = ptr as *mut Object;
+                // 先让 webview 完成首帧，再把 contentView 搬进面板
+                let _: () = msg_send![ns, orderFrontRegardless];
+            }
+            overlay_panel(&w2, px, py, width as i32, height as i32);
+        });
+        let _ = app2;
+        return SHOW_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    }
     let _ = win.show();
     // show() 之后 tao 可能又把层级/行为改回去，这里再确认一次（主线程、只置前不抢焦点）
     float_over_every_space(&win);
@@ -939,6 +1067,8 @@ fn main() {
             // 表现成「打不开、卡在后台」。改成普通应用：有 Dock 图标，关窗口只是隐藏。
             // 命令里用 State<Arc<Shared>> 读开关状态，必须先托管
             app.manage(shared_setup.clone());
+            bubble_helper::start_action_watcher();
+            bubble_helper::ensure_running();
 
             if let Some(bubble) = app.get_webview_window("bubble") {
                 float_over_every_space(&bubble);
@@ -1243,8 +1373,13 @@ fn main() {
             if let tauri::RunEvent::Reopen { .. } = event {
                 open_from_user(app_handle);
             }
+            match event {
+                tauri::RunEvent::ExitRequested { .. } => bubble_helper::shutdown(),
+                tauri::RunEvent::Exit => bubble_helper::shutdown(),
+                _ => {}
+            }
             #[cfg(not(target_os = "macos"))]
-            let _ = (app_handle, event);
+            let _ = app_handle;
         });
 }
 
