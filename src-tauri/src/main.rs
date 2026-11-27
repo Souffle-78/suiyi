@@ -810,11 +810,11 @@ fn float_over_every_space(_win: &tauri::WebviewWindow) {}
 
 /// Windows 版「NSPanel 化」：macOS 靠 styleMask(NonactivatingPanel) + level + cornerRadius
 /// 让气泡不抢焦点、不占任务栏、带原生圆角；Windows 上这里用 Win32 补同样的效果。
-/// passive=true 用于划词小图标（纯装饰，绝不该拿到焦点）；
-/// passive=false 用于气泡本体（按钮、重译输入都要能点能打字，所以保留激活能力）。
+/// 小图标和气泡本体都加 WS_EX_NOACTIVATE（macOS 的 NSPanel 也不会抢焦点），
+/// 需要打字时由 bubble_focus 临时摘下这个标志，松手/隐藏时再挂回去。
 /// 独占全屏、跨虚拟桌面没有公开 API，只能在 README 里写清楚。
 #[cfg(not(target_os = "macos"))]
-fn panelize(win: &tauri::WebviewWindow, passive: bool) {
+fn panelize(win: &tauri::WebviewWindow) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -831,9 +831,7 @@ fn panelize(win: &tauri::WebviewWindow, passive: bool) {
         let mut ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         // 工具窗：不出现在 Alt+Tab / 任务栏（配置里已经 skipTaskbar，双保险）
         ex |= WS_EX_TOOLWINDOW.0 as isize;
-        if passive {
-            ex |= WS_EX_NOACTIVATE.0 as isize;
-        }
+        ex |= WS_EX_NOACTIVATE.0 as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
         // Win11 的原生圆角/阴影，别再靠 CSS 假装
         let pref = DWMWCP_ROUND;
@@ -906,7 +904,7 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
     let win = win.clone();
     float_over_every_space(&win);
     #[cfg(not(target_os = "macos"))]
-    panelize(&win, false);
+    panelize(&win);
     let width = BUBBLE_WIDTH;
     let word = payload.card.as_ref().map(|c| c.mode == "word").unwrap_or(false);
     let has_ai = payload.card.as_ref().map(|c| c.ai.is_some()).unwrap_or(false);
@@ -996,7 +994,7 @@ fn show_selection_icon(app: &AppHandle, text: String, x: i32, y: i32) {
     let (px, py) = place_bubble(app, x, y, 36.0, 36.0);
     float_over_every_space(&win);
     #[cfg(not(target_os = "macos"))]
-    panelize(&win, true);
+    panelize(&win);
     let _ = win.set_size(tauri::LogicalSize::new(36.0, 36.0));
     let _ = win.set_position(tauri::PhysicalPosition::new(px, py));
     let _ = win.show();
@@ -1278,12 +1276,60 @@ fn open_word_in_main(app: AppHandle, word: String) {
     }
 }
 
+/// 气泡点进编辑态前记下的「用户原来在用的窗口」，重译/隐藏之后把焦点还回去。
+#[cfg(not(target_os = "macos"))]
+static PREV_FOREGROUND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(not(target_os = "macos"))]
+fn restore_previous_focus() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+    let h = PREV_FOREGROUND.swap(0, Ordering::Relaxed);
+    if h != 0 {
+        unsafe {
+            let _ = SetForegroundWindow(HWND(h as *mut core::ffi::c_void));
+        }
+    }
+}
+
+/// 气泡窗口带 WS_EX_NOACTIVATE（panelize），所以划词时不会把你正在用的应用
+/// 弄丢焦点——和 macOS 的 NSPanel 一样。但「改原文重译」要打字，
+/// 点原文时临时摘掉这个标志把焦点交给气泡，隐藏/重译后 show_bubble_in 会再挂回去。
+#[cfg(not(target_os = "macos"))]
+fn set_noactivate(win: &tauri::WebviewWindow, on: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    };
+    let Ok(h) = win.hwnd() else { return };
+    let hwnd = HWND(h.0);
+    unsafe {
+        let mut ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        ex = if on {
+            ex | WS_EX_NOACTIVATE.0 as isize
+        } else {
+            ex & !(WS_EX_NOACTIVATE.0 as isize)
+        };
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+    }
+}
+
 /// 气泡窗口是 focus:false 的（不抢焦点，划词时才不会把你正在用的应用弄丢焦点）。
 /// 但「改原文重译」要打字，所以点原文时临时把焦点交给气泡。
 #[tauri::command]
 fn bubble_focus(app: AppHandle) {
     if let Some(win) = app.get_webview_window("bubble") {
         if win.is_visible().unwrap_or(false) {
+            #[cfg(not(target_os = "macos"))]
+            {
+                // 先记住用户原来那个前台窗口，重译/隐藏后好还回去
+                use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                let fg = unsafe { GetForegroundWindow() };
+                if !fg.0.is_null() {
+                    PREV_FOREGROUND.store(fg.0 as isize, Ordering::Relaxed);
+                }
+                set_noactivate(&win, false);
+            }
             let _ = win.set_focus();
         }
     }
@@ -1293,6 +1339,11 @@ fn bubble_focus(app: AppHandle) {
 fn hide_bubble(app: AppHandle) {
     if let Some(win) = app.get_webview_window("bubble") {
         let _ = win.hide();
+        #[cfg(not(target_os = "macos"))]
+        {
+            set_noactivate(&win, true);
+            restore_previous_focus();
+        }
     }
 }
 
@@ -1310,7 +1361,15 @@ fn retranslate(app: AppHandle, text: String) {
         .and_then(|g| *g)
         .unwrap_or_else(last_cursor);
     log::line(format!("retranslate {} chars at ({x},{y})", text.chars().count()));
-    crate::translate_flow::translate_and_show(app, text, x as f64, y as f64);
+    crate::translate_flow::translate_and_show(app.clone(), text, x as f64, y as f64);
+    // 打完字重译完，把焦点还给用户原来那个窗口（气泡本身不该长期占着焦点）
+    #[cfg(not(target_os = "macos"))]
+    {
+        restore_previous_focus();
+        if let Some(win) = app.get_webview_window("bubble") {
+            set_noactivate(&win, true);
+        }
+    }
 }
 
 #[tauri::command]
