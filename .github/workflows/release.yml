@@ -40,7 +40,7 @@ jobs:
         with:
           node-version: 22
 
-      - run: npm install --no-fund --no-audit
+      - run: npm ci --no-fund --no-audit
 
       # macOS：先把气泡助手的 NSPanel 二进制编出来（bundle.resources 会把它塞进 App）
       - name: build bubble helper
@@ -65,8 +65,10 @@ jobs:
 
   # 打 tag（v0.7.1 这种）时把安装包挂到 GitHub Release 上，
   # 这样用户能直接从 Releases 页面下载，不用自己装 Rust 编译。
+  # 用 !cancelled() 而不是默认的「成功才跑」：万一 macOS 某个架构挂了，
+  # Windows 的安装包也要能挂上去，不能因为一个矩阵失败就让所有人下不到。
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     needs: build
     runs-on: ubuntu-latest
     steps:

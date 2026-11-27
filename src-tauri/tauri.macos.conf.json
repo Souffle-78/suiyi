@@ -1,8 +1,9 @@
 {
+  "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "resources": [
-      "helper/bin/suiyi-helper",
-      "resources/ecdict.sqlite"
+      "resources/ecdict.sqlite",
+      "helper/bin/suiyi-helper"
     ]
   }
 }
