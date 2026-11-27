@@ -47,12 +47,20 @@ npx tauri icon src-tauri/icons/source.png   # 生成 icns/ico/各尺寸 png
 npx tauri build                             # 产物在 src-tauri/target/release/bundle/
 ```
 
+`npx tauri build` 会先跑 `beforeBuildCommand`（`node scripts/make-helper.mjs`）：
+macOS 上它会编出气泡助手 `suiyi-helper` 并打进 `Contents/Resources/helper/bin/`，
+Windows / Linux 上直接跳过（助手是 macOS 独有的 NSPanel 进程）。
+所以**不用手动执行任何脚本**，`npm ci && npx tauri build` 就够了。
+
+Windows 上构建的额外前提：Rust 1.77+ 与 VS 生成工具（MSVC），
+以及给 cargo 设 `CARGO_PROFILE_DEV_DEBUG=0`（否则 `ring` 的 cc-rs 会传 `/Z7`，撞上 `cl.exe D8050`）。
+
 ## 运行
 
 ```bash
 npm install                 # 只装 tauri CLI
 npm run dev                 # 开发模式（会编译 Rust，首次较慢）
-npm run build               # 打 .app / .dmg（macOS 专用脚本）
+npm run build               # 打 .app / .dmg（macOS 专用脚本；Windows 用 npx tauri build）
 ```
 
 Windows 上不要用 `npm run build`（它调的是 macOS 的 `scripts/build.sh`，里面是 `codesign`），直接：

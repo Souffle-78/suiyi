@@ -4,7 +4,8 @@
   "version": "0.8.0",
   "identifier": "com.souffle.suiyi",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../src",
+    "beforeBuildCommand": "node scripts/make-helper.mjs"
   },
   "app": {
     "withGlobalTauri": true,

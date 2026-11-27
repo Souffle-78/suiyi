@@ -1,0 +1,16 @@
+# 仓库里所有 shell 脚本都必须是 LF：Windows 上 core.autocrlf=true 检出成 CRLF 后，
+# bash 会把 "\r" 当成命令的一部分，`bash scripts/xxx.sh` 直接报错（CI 的 macOS 任务也会因此挂掉）。
+.gitattributes text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+
+# Swift / Rust / 前端源码同样固定 LF，避免跨平台 diff 噪声
+*.swift text eol=lf
+*.rs text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
