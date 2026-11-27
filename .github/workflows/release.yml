@@ -79,7 +79,22 @@ jobs:
       - name: collect installers
         run: |
           mkdir -p dist
-          find artifacts -type f \( -name '*.exe' -o -name '*.dmg' \) -print -exec cp {} dist/ \;
+          ver="${GITHUB_REF_NAME#v}"
+          # 安装包文件名里带中文（productName 是「随译」），download-artifact 在
+          # ubuntu runner 上解出来的文件名可能被 locale 弄成乱码（实测变成 "_0.8.0_x64-setup.exe"）。
+          # 这里统一重命名成纯 ASCII 的 Suiyi_<版本>_<架构>，和 v0.7.x 那些老 release 一致。
+          find artifacts -type f \( -name '*.exe' -o -name '*.dmg' \) -print0 |
+          while IFS= read -r -d '' f; do
+            base="$(basename "$f")"
+            case "$base" in
+              *aarch64.dmg) out="Suiyi_${ver}_aarch64.dmg" ;;
+              *x64.dmg)     out="Suiyi_${ver}_x64.dmg" ;;
+              *setup.exe)   out="Suiyi_${ver}_x64-setup.exe" ;;
+              *)            out="Suiyi_${ver}_${base##*_}" ;;
+            esac
+            echo "rename: $f -> dist/$out"
+            cp "$f" "dist/$out"
+          done
           ls -l dist
 
       - uses: softprops/action-gh-release@v2
@@ -90,8 +105,8 @@ jobs:
           body: |
             随译 Suiyi ${{ github.ref_name }}
 
-            - Windows：下载 `随译_*_x64-setup.exe`（NSIS 安装包，未签名，SmartScreen 会提示「更多信息 → 仍要运行」）
-            - macOS：下载 `随译_*_aarch64.dmg`（Apple 芯片）或 `随译_*_x64.dmg`（Intel）
+            - Windows：下载 `Suiyi_*_x64-setup.exe`（NSIS 安装包，未签名，SmartScreen 会提示「更多信息 → 仍要运行」）
+            - macOS：下载 `Suiyi_*_aarch64.dmg`（Apple 芯片）或 `Suiyi_*_x64.dmg`（Intel）
 
             首次运行 Windows 版：托盘出现图标即可划词；设置页可填 DeepSeek API Key。
             首次运行 macOS 版：需要在「系统设置 → 隐私与安全性 → 辅助功能」里勾选随译。

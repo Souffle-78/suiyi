@@ -67,6 +67,7 @@ Windows 上不要用 `npm run build`（它调的是 macOS 的 `scripts/build.sh`
 
 ```powershell
 npx tauri build             # 产物：src-tauri/target/release/bundle/nsis/随译_x.y.z_x64-setup.exe
+                            # 发到 GitHub Release 时 workflow 会重命名成 Suiyi_x.y.z_x64-setup.exe（纯 ASCII）
 ```
 
 Windows 首次编译需要 Rust（rustup）+ Visual Studio 生成工具（MSVC + Windows SDK），
@@ -151,5 +152,5 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 
 见 https://github.com/Souffle-78/suiyi/releases
 
-- Windows：`随译_x.y.z_x64-setup.exe`，双击安装，托盘出现图标即可使用
-- macOS：`随译_x.y.z_aarch64.dmg`（Apple 芯片）/ `随译_x.y.z_x64.dmg`（Intel）
+- Windows：`Suiyi_x.y.z_x64-setup.exe`，双击安装，托盘出现图标即可使用
+- macOS：`Suiyi_x.y.z_aarch64.dmg`（Apple 芯片）/ `Suiyi_x.y.z_x64.dmg`（Intel）
