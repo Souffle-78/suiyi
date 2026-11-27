@@ -29,6 +29,13 @@ objc = "0.2"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 enigo = "0.2"
+# UIA TextPattern 读选区（macOS 用 AX，Windows 等价物是 UI Automation）
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 codegen-units = 1

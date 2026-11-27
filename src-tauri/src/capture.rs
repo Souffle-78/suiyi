@@ -160,11 +160,125 @@ mod ax {
 
 #[cfg(not(target_os = "macos"))]
 mod ax {
-    pub fn selected_text() -> Option<String> {
-        None
+    //! Windows 版的「辅助功能读选区」：UI Automation 的 TextPattern。
+    //!
+    //! macOS 用 `AXSelectedText` 兜底，Windows 的等价物是
+    //! `IUIAutomation::GetFocusedElement` → `UIA_TextPatternId` → `GetSelection`。
+    //! 只在模拟 Ctrl+C 拿不到东西之后才走这条路（有些程序禁用复制、或复制被拦截）。
+    //!
+    //! 覆盖范围：Chromium/Edge/Office/WPF/UWP/记事本等。
+    //! 拿不到的情况：控制台（conhost/Windows Terminal 的缓冲区）、部分 Qt/Java 程序，
+    //! 以及以管理员权限运行、而本进程不是管理员的窗口（UIPI 限制）。
+
+    use windows::core::Interface;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
+    };
+
+    fn read_focused_selection() -> Result<String, &'static str> {
+        unsafe {
+            // UIA 的 COM 对象要求当前线程初始化过 COM。失败（比如已经是别的套间）也继续试。
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let initialized = hr.is_ok();
+
+            let result = (|| -> Result<String, &'static str> {
+                let automation: IUIAutomation =
+                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|_| "CoCreateInstance failed")?;
+                let element = automation
+                    .GetFocusedElement()
+                    .map_err(|_| "GetFocusedElement failed")?;
+                let pattern: IUIAutomationTextPattern = element
+                    .GetCurrentPatternAs(UIA_TextPatternId)
+                    .map_err(|_| "no TextPattern on focused element")?;
+                let ranges = pattern.GetSelection().map_err(|_| "GetSelection failed")?;
+                let count = ranges.Length().map_err(|_| "Length failed")?;
+                let mut out = String::new();
+                for i in 0..count {
+                    let Ok(range) = ranges.GetElement(i) else {
+                        continue;
+                    };
+                    // -1 = 不限长度
+                    if let Ok(b) = range.GetText(-1) {
+                        out.push_str(&b.to_string());
+                    }
+                }
+                let trimmed = out.trim();
+                if trimmed.is_empty() {
+                    Err("selection empty")
+                } else {
+                    Ok(trimmed.to_string())
+                }
+            })();
+
+            if initialized {
+                CoUninitialize();
+            }
+            result
+        }
     }
+
+    pub fn selected_text() -> Option<String> {
+        // UIA 调用偶尔会卡在目标程序的 UI 线程上；放到独立线程里跑，超时就当读不到，
+        // 绝不拖住抓选区的主流程。
+        let started = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_focused_selection());
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_millis(1500))
+            .ok();
+        let ms = started.elapsed().as_millis();
+        match outcome {
+            Some(Ok(text)) => {
+                crate::log::line(&format!("ax: {ms}ms, got {} chars", text.chars().count()));
+                Some(text)
+            }
+            Some(Err(why)) => {
+                crate::log::line(&format!("ax: {ms}ms, {why}"));
+                None
+            }
+            None => {
+                crate::log::line(&format!("ax: {ms}ms, timeout"));
+                None
+            }
+        }
+    }
+
     pub fn probe() -> String {
-        "ax selected: unsupported on this platform".into()
+        // 排障用：把焦点元素的身份打出来，方便判断「没有 TextPattern」是因为焦点根本不在
+        // 文本控件上（比如焦点落在我们自己的气泡/主窗口），还是目标程序不支持 TextPattern。
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let automation: IUIAutomation =
+                match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                    Ok(a) => a,
+                    Err(_) => return "ax selected: none (CoCreateInstance failed)".into(),
+                };
+            let element = match automation.GetFocusedElement() {
+                Ok(e) => e,
+                Err(_) => return "ax selected: none (no focused element)".into(),
+            };
+            let name = element
+                .CurrentName()
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+            let class = element
+                .CurrentClassName()
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+            let ctype = element.CurrentControlType().map(|c| c.0).unwrap_or(0);
+            let desc = format!("focus=name:{name:?} class:{class:?} type:{ctype}");
+            match read_focused_selection() {
+                Ok(t) => format!("ax selected: {t:?} ({desc})"),
+                Err(why) => format!("ax selected: none ({why}; {desc})"),
+            }
+        }
     }
 }
 
@@ -315,13 +429,20 @@ fn ax_text() -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn ax_text() -> Option<String> {
-    None
+    ax::selected_text()
 }
 
 /// Grab the current selection.
 /// 先用模拟复制（快、跨应用最稳），拿不到再用辅助功能接口兜底（覆盖禁用复制的应用）。
 pub fn select_text() -> Option<String> {
-    let via_copy = clipboard_select();
+    // 排障开关：某些环境里模拟 Ctrl+C 会被拦（第三方输入法、热键冲突、远程桌面），
+    // 设 SUIYI_NO_COPY=1 就跳过复制，直接走 UI Automation。
+    let skip_copy = std::env::var("SUIYI_NO_COPY").is_ok();
+    let via_copy = if skip_copy {
+        None
+    } else {
+        clipboard_select()
+    };
     if let Some(t) = via_copy {
         let t = t.trim().to_string();
         if !t.is_empty() {
