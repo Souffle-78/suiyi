@@ -52,12 +52,22 @@ npx tauri build                             # 产物在 src-tauri/target/release
 ```bash
 npm install                 # 只装 tauri CLI
 npm run dev                 # 开发模式（会编译 Rust，首次较慢）
-npm run build               # 打 .app / .dmg（macOS）
+npm run build               # 打 .app / .dmg（macOS 专用脚本）
 ```
 
-首次运行需要给 **辅助功能（Accessibility）** 权限：
+Windows 上不要用 `npm run build`（它调的是 macOS 的 `scripts/build.sh`，里面是 `codesign`），直接：
+
+```powershell
+npx tauri build             # 产物：src-tauri/target/release/bundle/nsis/随译_x.y.z_x64-setup.exe
+```
+
+Windows 首次编译需要 Rust（rustup）+ Visual Studio 生成工具（MSVC + Windows SDK），
+装好后 `cargo check` 若在 `ring` 的 `c1.dll` 上报 `D8050`，是 dev profile 的 `/Z7` 调试信息引起的，
+用 `CARGO_PROFILE_DEV_DEBUG=0` 再编译即可（release 构建不受影响）。
+
+首次运行 macOS 版需要给 **辅助功能（Accessibility）** 权限：
 系统设置 → 隐私与安全性 → 辅助功能 → 勾选「随译」。
-没有这个权限，读不到选区、也发不出 ⌘C。
+没有这个权限，读不到选区、也发不出 ⌘C。Windows 不需要任何授权。
 
 ## 目录
 
