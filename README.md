@@ -13,18 +13,18 @@
 - **主界面**（`翻译 / 生词本 / 历史 / 设置` 四个页签）：左边输入原文、右边看译文，`⌘↩` 直接翻译，`Esc` 收起窗口
 - **查词**：输入单个英文单词时，除了译文还会给出音标、词性、英文释义与例句（免 key 的 dictionaryapi.dev）
 - 设置页：目标语言（10 种）、线路切换、DeepSeek key 与模型、术语表（一行一条 `原文 = 译文`）、开机自启、权限状态
-- 鼠标旁弹出结果气泡：复制译文 / 存生词 / 关闭；点别处或 25 秒自动收起
+- 鼠标旁弹出结果气泡：复制译文 / 存生词 / 朗读 / 查词 / ✨精解 / 改原文重译 / 关闭；点别处或 25 秒不悬停自动收起
 - **全屏应用里也能划词**：气泡由独立的 macOS 助手进程（`suiyi-helper`）用 `NSPanel` 画出来，
-  Safari、预览等进入全屏空间时照样浮在最上面（普通窗口做不到这件事）
+  Safari、预览等进入全屏空间时照样浮在最上面（普通窗口做不到这件事）；Windows 侧用无边框置顶窗口实现
 - **先出小图标再展开**：划词后选区旁先出现一个小图标，点它或悬停才展开译文；面板里的原文可以直接改，
-  改完 `⌘↩` 重译
+  改完回车（macOS `⌘↩`）重译
 - **单词即词典**：单个英文词显示音标、词性、多条释义；翻译页里输入单词或短语，也会在译文下方
   给出词典/逐词速览
 - 历史记录窗口：搜索、复制译文、清空（本地 JSONL，最多留 2000 条）
 - **生词本**：气泡上「存生词」一键收进自己的词库，历史窗口第二个页签里搜索、复制、删除、导出 Markdown
-- **开机自启**：设置里勾一下，登录后自动常驻菜单栏（LaunchAgent / 注册表 / autostart）
-- 菜单栏图标：暂停划词、设置…、历史记录…、辅助功能权限…、退出
-- 配置文件：`~/Library/Application Support/suiyi/config.json`（改完保存即生效，不用重启）
+- **开机自启**：设置里勾一下，登录后自动常驻菜单栏 / 系统托盘（LaunchAgent / 注册表 / autostart）
+- 托盘图标：暂停划词、翻译剪贴板、设置…、历史记录…、退出（macOS 另有「辅助功能权限…」）
+- 配置文件：macOS `~/Library/Application Support/suiyi/config.json`、Windows `%APPDATA%\suiyi\config.json`（改完保存即生效，不用重启）
 
 ## 无界面自检
 
@@ -70,11 +70,14 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 
 ## 已知限制（待办）
 
-- Windows 的全局钩子后端（WH_MOUSE_LL）还没接
 - 只有中文界面
 - 气泡的 macOS 部分拆成了两个进程（主程序 + `suiyi-helper`），排查问题时要看两边的日志：
-  主程序 `suiyi.log`，助手在同目录（`bubble-helper.pid` 里是它的 pid）
+  主程序 `suiyi.log`，助手在同目录（`bubble-helper.pid` 里是它的 pid）。Windows 只有主程序一个进程。
 - macOS 分发需要签名与公证，否则别人首次打开会被 Gatekeeper 拦
+- Windows 版的两个平台限制（系统没有公开 API，做不到）：
+  - 气泡浮在**独占全屏**（DirectX exclusive，部分游戏/播放器）之上做不到；无边框全屏（浏览器 F11）没问题
+  - 气泡只在**创建它的虚拟桌面**上可见，不会像 macOS 的 `canJoinAllSpaces` 那样跟随所有桌面
+  - 以管理员权限运行的窗口（任务管理器、UAC 提权程序）里划词收不到：Windows 的 UIPI 不允许低权限程序读到高权限窗口的输入与选区
 - 本机开发用自签证书固定签名（否则每次重编译「辅助功能 / 输入监控」授权都会失效）：
   ```bash
   security create-keychain -p suiyi-build ~/Library/Keychains/suiyi-signing.keychain-db
@@ -93,9 +96,16 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 | 平台 | 抓选区方式 | 状态 |
 | --- | --- | --- |
 | macOS 12+ | 模拟 ⌘C（兜底系统辅助功能接口） | 已跑通，需在「辅助功能」里授权 |
-| Windows 10/11 | 模拟 Ctrl+C | 代码同一套，需在 Windows 机器上验证 |
+| Windows 10/11 | 模拟 Ctrl+C（先写哨兵再判定，结果必还原剪贴板） | 已跑通，无需授权 |
 
-`.github/workflows/release.yml` 里已经把双端的依赖和构建矩阵写好了（打 tag 触发）。
+两端功能对齐：划词先冒小图标、悬停/点击展开、单词卡片（音标/词性/多义/例句/更多释义）、
+✨AI 精解、朗读、查词、改原文重译、存生词、复制、25 秒不悬停自动收起、托盘菜单、开机自启。
+
+实现差异（平台能力不同，效果一致）：
+`NSPanel` 换成一个 36×36 的置顶 webview 窗口；`AVSpeechSynthesizer` 换成 WebView2 的 `speechSynthesis`；
+气泡高度由前端量内容后回传，不再写死。
+
+`.github/workflows/release.yml` 里已经把双端的依赖和构建矩阵写好了（打 tag 触发，并自动把安装包挂到 Release）。
 
 ## 权限要求
 
@@ -103,15 +113,21 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
   没授权时菜单栏图标仍在，但划词不会触发；授权后新版会自动挂上钩子，不用重启。
 - 重新编译覆盖 `/Applications/随译.app` 之后，macOS 可能把它当成新程序：如果授权过却仍无反应，
   去列表里把「随译」删掉（− 号）再重新勾一次。
-- **Windows**：无需额外授权；部分以管理员权限运行的窗口（任务管理器等）需要同权限运行本程序。
+- **Windows**：无需额外授权。只有以管理员权限运行的窗口（任务管理器等）要同权限运行本程序才能划词。
 
 ## 常见问题
 
-- **选中没反应**：先看 `~/Library/Application Support/suiyi/suiyi.log`（Windows: `%APPDATA%\suiyi\suiyi.log`，
+- **选中没反应**：先看日志 —— macOS `~/Library/Application Support/suiyi/suiyi.log`，
+  Windows `%APPDATA%\suiyi\suiyi.log`（设置 `SUIYI_TRACE=1` 启动会打印每个鼠标事件）。
 - **译不出来**：设置里换线路试试；Google/Bing 免密钥但有频率限制，长文本建议用 DeepSeek 精翻。
-- **气泡位置怪**：多屏 / 缩放比例不同时会在屏幕边界内夹取，仍可手动拖动（气泡可拖）。
+- **气泡位置怪**：多屏 / 缩放比例不同时会在屏幕边界内夹取；Windows 上高 DPI 已按显示器 scale 折算。
+- **Windows 安装时被 SmartScreen 拦**：安装包没有代码签名，点「更多信息 → 仍要运行」。
+  首次启动会自动用 WebView2 的引导程序装运行时（Win11 自带，Win10 可能需要联网装一次）。
 
 
 ## 下载
 
 见 https://github.com/Souffle-78/suiyi/releases
+
+- Windows：`随译_x.y.z_x64-setup.exe`，双击安装，托盘出现图标即可使用
+- macOS：`随译_x.y.z_aarch64.dmg`（Apple 芯片）/ `随译_x.y.z_x64.dmg`（Intel）

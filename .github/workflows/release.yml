@@ -62,3 +62,34 @@ jobs:
           name: suiyi-${{ matrix.platform }}-${{ matrix.target || 'native' }}
           path: src-tauri/target/**/release/bundle/**
           if-no-files-found: warn
+
+  # 打 tag（v0.7.1 这种）时把安装包挂到 GitHub Release 上，
+  # 这样用户能直接从 Releases 页面下载，不用自己装 Rust 编译。
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: collect installers
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*.exe' -o -name '*.dmg' \) -print -exec cp {} dist/ \;
+          ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          generate_release_notes: true
+          body: |
+            随译 Suiyi ${{ github.ref_name }}
+
+            - Windows：下载 `随译_*_x64-setup.exe`（NSIS 安装包，未签名，SmartScreen 会提示「更多信息 → 仍要运行」）
+            - macOS：下载 `随译_*_aarch64.dmg`（Apple 芯片）或 `随译_*_x64.dmg`（Intel）
+
+            首次运行 Windows 版：托盘出现图标即可划词；设置页可填 DeepSeek API Key。
+            首次运行 macOS 版：需要在「系统设置 → 隐私与安全性 → 辅助功能」里勾选随译。

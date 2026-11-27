@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -286,18 +286,27 @@
     });
 
     // ---- 朗读：走 WebView2 内置的 speechSynthesis，不依赖任何原生库 ----
+    // 系统里没有对应语音包时 speechSynthesis 会静默失败，这里留一条日志方便排查。
     $('speak').onclick = () => {
       const word = (last && last.source) || $('hw').innerText || '';
-      if (!word || !window.speechSynthesis) return;
+      if (!word) return;
+      if (!window.speechSynthesis) { log('tts: speechSynthesis 不可用'); return; }
       try {
+        const voices = window.speechSynthesis.getVoices() || [];
+        const lang = /[一-龥]/.test(word) ? 'zh-CN' : 'en-US';
+        if (voices.length && !voices.some(v => (v.lang || '').toLowerCase().startsWith(lang.slice(0, 2)))) {
+          log(`tts: 没有 ${lang} 语音包（现有 ${voices.map(v => v.lang).join(',')}）`);
+        }
         window.speechSynthesis.cancel();
         const u = new SpeechSynthesisUtterance(word);
-        u.lang = /[一-龥]/.test(word) ? 'zh-CN' : 'en-US';
+        u.lang = lang;
         u.rate = 0.95;
         window.speechSynthesis.speak(u);
         $('speak').textContent = '…';
         setTimeout(() => { $('speak').textContent = '朗读'; }, 1200);
-      } catch (_) {}
+      } catch (e) {
+        log('tts error: ' + e);
+      }
     };
 
     // ---- 查词：把词丢进主窗口的翻译框 ----

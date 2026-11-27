@@ -73,6 +73,21 @@
   },
   "bundle": {
     "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
