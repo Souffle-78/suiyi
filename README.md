@@ -95,7 +95,7 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 | macOS 12+ | 模拟 ⌘C（兜底系统辅助功能接口） | 已跑通，需在「辅助功能」里授权 |
 | Windows 10/11 | 模拟 Ctrl+C | 代码同一套，需在 Windows 机器上验证 |
 
-`.github/workflows/release.yml` 里已经把三端的依赖和构建矩阵写好了（打 tag 触发）。
+`.github/workflows/release.yml` 里已经把双端的依赖和构建矩阵写好了（打 tag 触发）。
 
 ## 权限要求
 
