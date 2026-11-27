@@ -196,6 +196,10 @@
         return;
       }
       $('aiBtn').textContent = '✨ 精解';
+      // 精解会让卡片变高；窗口高度是 Rust 侧定的，得请它重新量一次
+      if (last.card && last.card.mode === 'word') {
+        api.core.invoke('resize_bubble', { height: 460 }).catch(() => {});
+      }
     };
     $('save').onclick = async () => {
       if (!last || !last.source || !last.text) return;

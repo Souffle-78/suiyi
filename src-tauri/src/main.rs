@@ -184,6 +184,20 @@ fn bubble_state() -> Option<BubblePayload> {
     LAST_PAYLOAD.lock().ok().and_then(|guard| guard.clone())
 }
 
+/// 单词卡片拿到 AI 精解后把气泡撑高。气泡高度是 Rust 侧按 card 算的，
+/// 页面里只能改内容、改不了窗口大小，所以这里补一个命令。
+#[tauri::command]
+fn resize_bubble(app: AppHandle, height: f64) -> bool {
+    let Some(win) = app.get_webview_window("bubble") else {
+        return false;
+    };
+    if !win.is_visible().unwrap_or(false) {
+        return false;
+    }
+    let h = height.clamp(120.0, 640.0);
+    win.set_size(tauri::LogicalSize::new(380.0, h)).is_ok()
+}
+
 #[tauri::command]
 fn close_main_window(app: AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -449,6 +463,35 @@ fn pick_monitor(app: &AppHandle, lx: i32, ly: i32) -> Option<tauri::Monitor> {
 
 /// 最近一次鼠标位置（逻辑点，左上角原点）。由全局钩子持续刷新。
 static LAST_CURSOR: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+/// 全局钩子给的坐标是什么单位？macOS 的 CGEventTap 给逻辑点；Windows 的 rdev
+/// 直接把 `MSLLHOOKSTRUCT.pt` 交出来，那是物理像素。后面 show_bubble_in /
+/// inside_own_window 一律按逻辑点算，所以这里先按所在显示器折回逻辑点。
+/// （150% 缩放下不折的话，气泡会落到「物理坐标再乘一遍 1.5」的位置。）
+#[cfg(target_os = "macos")]
+fn hook_point(_app: &AppHandle, x: f64, y: f64) -> (f64, f64) {
+    (x, y)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hook_point(app: &AppHandle, x: f64, y: f64) -> (f64, f64) {
+    let monitors = app.available_monitors().unwrap_or_default();
+    for m in &monitors {
+        let pos = m.position();
+        let size = m.size();
+        if x >= pos.x as f64
+            && x < (pos.x + size.width as i32) as f64
+            && y >= pos.y as f64
+            && y < (pos.y + size.height as i32) as f64
+        {
+            let s = m.scale_factor();
+            if s > 0.0 {
+                return (x / s, y / s);
+            }
+        }
+    }
+    (x, y)
+}
 
 fn note_cursor(x: f64, y: f64) {
     if let Ok(mut c) = LAST_CURSOR.lock() {
@@ -778,13 +821,17 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
     }
 
     log::line(format!(
-        "bubble at ({px},{py}) requested ({x},{y}) size {width}x{height} loading={}",
-        payload.loading
+        "bubble at ({px},{py}) requested ({x},{y}) size {width}x{height} loading={} mode={:?}",
+        payload.loading,
+        payload.card.as_ref().map(|c| c.mode.clone())
     ));
     if let Ok(mut guard) = LAST_PAYLOAD.lock() {
         *guard = Some(payload.clone());
     }
     let _ = win.set_position(PhysicalPosition::new(px, py));
+    // macOS 走 NSPanel 助手，高度由 Swift 侧按卡片算；Windows/Linux 的 webview
+    // 气泡得自己改大小，否则窗口永远是配置里的 380x200，单词卡片会被裁掉。
+    let _ = win.set_size(tauri::LogicalSize::new(width, height));
     // 事件通道偶发丢包（隐藏窗口刚 show 时 webview 还没挂好监听），
     // 这里直接 eval 调用页面里的全局渲染函数，保证一定能画出来。
     match serde_json::to_string(&payload) {
@@ -845,6 +892,20 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
         let last_up: std::cell::Cell<Option<(Instant, f64, f64, u8)>> = std::cell::Cell::new(None);
 
         let result = hook::listen(move |ev| {
+            let ev = match ev {
+                hook::MouseEvent::Down(x, y) => {
+                    let (x, y) = hook_point(&handler_app, x, y);
+                    hook::MouseEvent::Down(x, y)
+                }
+                hook::MouseEvent::Dragged(x, y) => {
+                    let (x, y) = hook_point(&handler_app, x, y);
+                    hook::MouseEvent::Dragged(x, y)
+                }
+                hook::MouseEvent::Up(x, y) => {
+                    let (x, y) = hook_point(&handler_app, x, y);
+                    hook::MouseEvent::Up(x, y)
+                }
+            };
             if trace {
                 log::line(format!("ev {:?}", ev));
             }
@@ -960,48 +1021,13 @@ fn on_release(
             log::line(format!("bubble icon shown ({} chars)", text.chars().count()));
             return;
         }
-        let cfg = config::load();
-        show_bubble(
-            &app,
-            bx,
-            by,
-            BubblePayload {
-                source: text.clone(),
-                text: String::new(),
-                detected: String::new(),
-                target: cfg.target.clone(),
-                provider: cfg.provider.clone(),
-                loading: true,
-                error: None,
-                card: None,
-            },
-        );
-        let payload = match translate::run(&text, &cfg) {
-            Ok(t) => {
-                history::record(&t);
-                BubblePayload {
-                    source: t.source,
-                    text: t.text,
-                    detected: t.detected,
-                    target: t.target,
-                    provider: t.provider,
-                    loading: false,
-                    error: None,
-                    card: None,
-                }
-            }
-            Err(e) => BubblePayload {
-                source: text,
-                text: String::new(),
-                detected: String::new(),
-                target: cfg.target.clone(),
-                provider: cfg.provider.clone(),
-                loading: false,
-                error: Some(e),
-                card: None,
-            },
-        };
-        let gen = show_bubble(&app, bx, by, payload);
+        // Windows / Linux 没有「先冒小图标、点了再翻译」的中间态，直接走
+        // translate_flow 的完整流程：单词会补词典释义，卡片高度按 word 算，
+        // 气泡里的 ✨精解 / 生词本 也才有 card 数据可用。
+        // （这里原先自己拼 payload、绕过 translate_flow，导致 Windows 上
+        // 单词卡片和 AI 精解永远出不来。）
+        crate::translate_flow::translate_and_show(app.clone(), text, x, y);
+        let gen = SHOW_GEN.load(Ordering::SeqCst);
         let app_hide = app.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(25));
@@ -1544,6 +1570,7 @@ fn main() {
             get_config,
             set_config,
             bubble_state,
+            resize_bubble,
             js_log,
             translate_text,
             lookup_word,
