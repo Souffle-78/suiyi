@@ -721,7 +721,7 @@ $('openInput').addEventListener('click', () => invoke('open_input_settings'));
 // ---------- 启动 ----------
 (async () => {
   await loadSettings();
-  $('ver').textContent = '0.6.2';
+  $('ver').textContent = '0.6.3';
   updateCount();
   const tab = new URLSearchParams(location.search).get('tab');
   switchTab(tab || 'translate');

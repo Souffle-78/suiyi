@@ -469,12 +469,10 @@ final class BubbleView: NSView, NSTextViewDelegate {
         // 中文释义：一行一个词性，「n. 行动；行为；战斗」这种词组式，扫一眼就懂
         let zhSenses = r.senses.filter { $0.zh == true }
         if !zhSenses.isEmpty {
-            let shown = expanded ? zhSenses : Array(zhSenses.prefix(3))
-            for s in shown {
+            // 中文释义：全部给出来，卡片内部滚动，不再截断成「…」
+            for s in zhSenses {
                 let head = s.pos.isEmpty ? "" : shortPos(s.pos) + " "
-                let items = expanded ? s.defs : Array(s.defs.prefix(2))
-                var line = head + items.joined(separator: "；")
-                if !expanded && s.defs.count > items.count { line += "…" }
+                let line = head + s.defs.joined(separator: "；")
                 let p2 = NSMutableParagraphStyle()
                 p2.lineSpacing = 3
                 p2.paragraphSpacing = 6
@@ -551,9 +549,10 @@ final class BubbleView: NSView, NSTextViewDelegate {
         redoBtn.isHidden = isWord && !editingSource
         editBtn.isHidden = !isWord
 
-        let hasMore = r.senses.count > 2
+        let hasZh = r.senses.contains { $0.zh == true }
+        let hasMore = !hasZh && (r.senses.count > 2
             || r.senses.contains { $0.defs.count > 2 }
-            || r.senses.contains { ($0.examples ?? []).count > 1 }
+            || r.senses.contains { ($0.examples ?? []).count > 1 })
         moreBtn.isHidden = !(isWord && (hasMore || expanded))
         moreBtn.title = expanded ? "收起 ‹" : "更多释义 ›"
 
@@ -598,7 +597,7 @@ final class BubbleView: NSView, NSTextViewDelegate {
             : (pad + 16 + 8 + sourceH + 10)
         let bottomChrome: CGFloat = isWord ? (pad + 26) : (pad + 26 + pad / 2)
         var height = topChrome + textHeight + bottomChrome
-        height = min(max(height, 150), 440)
+        height = min(max(height, 150), 520)
 
         frame = NSRect(x: 0, y: 0, width: panelWidth, height: height)
 
@@ -629,7 +628,10 @@ final class BubbleView: NSView, NSTextViewDelegate {
 
             let bodyBottom = btnY + 26 + 10
             let bodyTop = (editingSource ? sourceBox.frame.minY : phonY) - 16
-            scroll.frame = NSRect(x: pad, y: bodyBottom, width: bodyWidth, height: max(24, bodyTop - bodyBottom))
+            let bodyHeight = max(24, bodyTop - bodyBottom)
+            scroll.frame = NSRect(x: pad, y: bodyBottom, width: bodyWidth, height: bodyHeight)
+            body.frame = NSRect(x: 0, y: 0, width: bodyWidth, height: max(textHeight, bodyHeight))
+            scroll.hasVerticalScroller = textHeight > bodyHeight + 1
         } else {
             header.frame = NSRect(x: pad, y: height - pad - 16, width: bodyWidth, height: 16)
             sourceBox.frame = NSRect(x: pad, y: height - pad - 16 - 8 - sourceH, width: bodyWidth, height: sourceH)
@@ -645,7 +647,10 @@ final class BubbleView: NSView, NSTextViewDelegate {
 
             let bodyBottom = btnY + 26 + 12
             let bodyTop = sourceBox.frame.minY - 10
-            scroll.frame = NSRect(x: pad, y: bodyBottom, width: bodyWidth, height: max(20, bodyTop - bodyBottom))
+            let bodyHeight = max(20, bodyTop - bodyBottom)
+            scroll.frame = NSRect(x: pad, y: bodyBottom, width: bodyWidth, height: bodyHeight)
+            body.frame = NSRect(x: 0, y: 0, width: bodyWidth, height: max(textHeight, bodyHeight))
+            scroll.hasVerticalScroller = textHeight > bodyHeight + 1
         }
 
         body.textStorage?.setAttributedString(attr)
