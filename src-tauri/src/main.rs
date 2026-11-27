@@ -970,6 +970,14 @@ fn main() {
             }
             return;
         }
+        if mode == "dict" {
+            let word = std::env::var("SUIYI_PROBE_WORD").unwrap_or_else(|_| "action".into());
+            match translate::lookup(&word) {
+                Ok(d) => println!("dict {}", serde_json::to_string(&d).unwrap_or_default()),
+                Err(e) => println!("ERR {e}"),
+            }
+            return;
+        }
         if mode == "clip" {
             match clipboard_text() {
                 Some(text) => {

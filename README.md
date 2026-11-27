@@ -1,5 +1,7 @@
 # 随译 · Suiyi
 
+![随译单词卡片](assets/word-card.png)
+
 ![随译主界面](assets/screenshot-app.png)
 
 选中任意应用里的文字，立刻在鼠标旁弹出译文。Windows / macOS 双端。
