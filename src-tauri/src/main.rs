@@ -1070,6 +1070,11 @@ fn close_permission_window(app: AppHandle) {
         let _ = win.hide();
     }
     // 不要退回 Accessory：那会让 Dock 图标消失，用户就找不到入口了。
+    // 只有 macOS 需要「授权完成后回到主窗口」；Windows 没有权限流程
+    // （is_trusted 恒 true、input_monitoring 恒 None），permission.html 的
+    // 轮询会在启动 1.5s 后立刻走进这里——若无条件 show()，主窗口会自己弹出来，
+    // 和 setup 里「launched — main window kept closed」的预期相反。
+    #[cfg(target_os = "macos")]
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
