@@ -19,6 +19,7 @@
 // 构建：scripts/make-helper.sh（swiftc），产物随 bundle 一起签名。
 
 import Cocoa
+import AVFoundation
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
@@ -36,6 +37,12 @@ try? "\(ProcessInfo.processInfo.processIdentifier)".write(to: pidPath, atomicall
 struct Sense: Decodable {
     var pos: String
     var defs: [String]
+    var examples: [String]?
+}
+
+struct PhoneticLite: Decodable {
+    var label: String
+    var text: String
 }
 
 struct Request: Decodable {
@@ -48,6 +55,7 @@ struct Request: Decodable {
     var error: String?
     var mode: String
     var phonetic: String
+    var phonetics: [PhoneticLite]?
     var senses: [Sense]
     var x: Double
     var y: Double
@@ -168,18 +176,35 @@ final class SourceEditor: NSTextView {
 }
 
 final class BubbleView: NSView, NSTextViewDelegate {
+    // 句子模式
     let header = NSTextField(labelWithString: "")
-    let sourceBox = NSScrollView()
-    let sourceView = SourceEditor()
     let body = NSTextView()
     let scroll = NSScrollView()
     let copyBtn = NSButton(title: "复制译文", target: nil, action: nil)
     let redoBtn = NSButton(title: "重新翻译", target: nil, action: nil)
     let vocabBtn = NSButton(title: "存生词", target: nil, action: nil)
     let closeBtn = NSButton(title: "关闭", target: nil, action: nil)
+    // 单词模式（有道的查词卡）
+    let headword = NSTextField(labelWithString: "")
+    let phonLabel = NSTextField(labelWithString: "")
+    let speakBtn = NSButton(title: "", target: nil, action: nil)
+    let editBtn = NSButton(title: "", target: nil, action: nil)
+    let searchBtn = NSButton(title: "", target: nil, action: nil)
+    let hair = NSView()
+    /// 单词卡片里原文框默认收起，点铅笔才展开
+    var editingSource = false
+    let starBtn = NSButton(title: "", target: nil, action: nil)
+    let glyphBtn = NSButton(title: "", target: nil, action: nil)
+    let xBtn = NSButton(title: "", target: nil, action: nil)
+    let moreBtn = NSButton(title: "", target: nil, action: nil)
+    // 共用
+    let sourceBox = NSScrollView()
+    let sourceView = SourceEditor()
+
     var current: Request?
-    /// 用户动过原文就不要再被新结果覆盖
     var userEdited = false
+    var expanded = false
+    let speaker = AVSpeechSynthesizer()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -194,13 +219,60 @@ final class BubbleView: NSView, NSTextViewDelegate {
         header.lineBreakMode = .byTruncatingTail
         addSubview(header)
 
-        // 可编辑原文
+        headword.font = .systemFont(ofSize: 22, weight: .semibold)
+        headword.textColor = .white
+        headword.lineBreakMode = .byTruncatingTail
+        addSubview(headword)
+
+        phonLabel.font = .systemFont(ofSize: 12.5)
+        phonLabel.textColor = NSColor(white: 0.72, alpha: 1)
+        phonLabel.lineBreakMode = .byTruncatingTail
+        addSubview(phonLabel)
+
+        for (b, symbol, tip, act) in [
+            (xBtn, "xmark", "关闭", #selector(doClose)),
+            (glyphBtn, "square.on.square", "复制译文", #selector(doCopy)),
+            (starBtn, "star", "存生词", #selector(doVocab)),
+            (searchBtn, "magnifyingglass", "在主窗口查词", #selector(doSearch)),
+        ] as [(NSButton, String, String, Selector)] {
+            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+            b.imagePosition = .imageOnly
+            b.isBordered = false
+            b.contentTintColor = NSColor(white: 0.8, alpha: 1)
+            b.toolTip = tip
+            b.target = self
+            b.action = act
+            addSubview(b)
+        }
+        speakBtn.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "朗读")
+        speakBtn.imagePosition = .imageOnly
+        speakBtn.isBordered = false
+        speakBtn.contentTintColor = NSColor(white: 0.7, alpha: 1)
+        speakBtn.toolTip = "朗读"
+        speakBtn.target = self
+        speakBtn.action = #selector(doSpeak)
+        addSubview(speakBtn)
+
+        editBtn.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "编辑原文")
+        editBtn.imagePosition = .imageOnly
+        editBtn.isBordered = false
+        editBtn.contentTintColor = NSColor(white: 0.7, alpha: 1)
+        editBtn.toolTip = "编辑原文"
+        editBtn.target = self
+        editBtn.action = #selector(doToggleEdit)
+        addSubview(editBtn)
+
+        hair.wantsLayer = true
+        hair.layer?.backgroundColor = NSColor(white: 1, alpha: 0.10).cgColor
+        addSubview(hair)
+
+        // 可编辑原文（两种模式都有）
         sourceView.isRichText = false
         sourceView.drawsBackground = false
         sourceView.textContainerInset = NSSize(width: 6, height: 5)
         sourceView.textContainer?.lineFragmentPadding = 2
         sourceView.font = .systemFont(ofSize: 12)
-        sourceView.textColor = NSColor(white: 0.92, alpha: 1)
+        sourceView.textColor = NSColor(white: 0.9, alpha: 1)
         sourceView.insertionPointColor = NSColor(white: 0.95, alpha: 1)
         sourceView.isAutomaticQuoteSubstitutionEnabled = false
         sourceView.isAutomaticSpellingCorrectionEnabled = false
@@ -225,17 +297,22 @@ final class BubbleView: NSView, NSTextViewDelegate {
         scroll.autohidesScrollers = true
         addSubview(scroll)
 
-        for b in [copyBtn, redoBtn, vocabBtn, closeBtn] {
+        for b in [copyBtn, redoBtn, vocabBtn, closeBtn, moreBtn] {
             b.bezelStyle = .rounded
             b.controlSize = .small
             b.font = .systemFont(ofSize: 12)
-            b.contentTintColor = NSColor(white: 0.92, alpha: 1)
+            b.contentTintColor = NSColor(white: 0.9, alpha: 1)
             addSubview(b)
         }
         copyBtn.target = self; copyBtn.action = #selector(doCopy)
         redoBtn.target = self; redoBtn.action = #selector(doRedo)
         vocabBtn.target = self; vocabBtn.action = #selector(doVocab)
         closeBtn.target = self; closeBtn.action = #selector(doClose)
+        moreBtn.bezelStyle = .inline
+        moreBtn.isBordered = false
+        moreBtn.contentTintColor = NSColor(white: 0.75, alpha: 1)
+        moreBtn.target = self
+        moreBtn.action = #selector(doMore)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -251,13 +328,78 @@ final class BubbleView: NSView, NSTextViewDelegate {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(r.text, forType: .string)
         copyBtn.title = "已复制"
-        writeAction("copy", source: r.source, text: r.text, x: r.x, y: r.y)
+        glyphBtn.toolTip = "已复制"
+        writeAction("copy", source: sourceView.string, text: r.text, x: r.x, y: r.y)
     }
 
     @objc func doVocab() {
+        FileHandle.standardError.write("click star btn\n".data(using: .utf8)!)
         guard let r = current, !r.text.isEmpty else { return }
         vocabBtn.title = "已存入"
+        starBtn.contentTintColor = NSColor.systemYellow
         writeAction("vocab", source: sourceView.string, text: r.text, x: r.x, y: r.y)
+    }
+
+    @objc func doSearch() {
+        guard let r = current else { return }
+        writeAction("open_main", source: r.source, text: r.text, x: r.x, y: r.y)
+        // 送进主窗口后收起卡片，避免压在主窗口上
+        window?.orderOut(nil)
+    }
+
+    @objc func doSpeak() {
+        guard let r = current else { return }
+        let word = sourceView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !word.isEmpty else { return }
+        let utter = AVSpeechUtterance(string: word)
+        utter.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utter.rate = 0.46
+        speaker.stopSpeaking(at: .immediate)
+        speaker.speak(utter)
+        _ = r
+    }
+
+    @objc func doToggleEdit() {
+        FileHandle.standardError.write("click pencil btn\n".data(using: .utf8)!)
+        editingSource.toggle()
+        guard let r = current else { return }
+        let h = render(r)
+        if let win = window as? NSPanel {
+            var f = win.frame
+            f.origin.y += (f.height - h)
+            f.size.height = h
+            if let screen = win.screen ?? NSScreen.main {
+                let vf = screen.visibleFrame
+                f.origin.y = min(max(f.origin.y, vf.minY + 8), vf.maxY - h - 8)
+            }
+            win.setFrame(f, display: true)
+        } else {
+            window?.setContentSize(NSSize(width: panelWidth, height: h))
+        }
+        if editingSource {
+            window?.makeKeyAndOrderFront(nil)
+            window?.makeFirstResponder(sourceView)
+            sourceView.setSelectedRange(NSRange(location: 0, length: sourceView.string.count))
+        }
+    }
+
+    @objc func doMore() {
+        FileHandle.standardError.write("click more btn\n".data(using: .utf8)!)
+        expanded.toggle()
+        guard let r = current else { return }
+        let h = render(r)
+        if let win = window as? NSPanel {
+            var f = win.frame
+            f.origin.y += (f.height - h)
+            f.size.height = h
+            if let screen = win.screen ?? NSScreen.main {
+                let vf = screen.visibleFrame
+                f.origin.y = min(max(f.origin.y, vf.minY + 8), vf.maxY - h - 8)
+            }
+            win.setFrame(f, display: true)
+        } else {
+            window?.setContentSize(NSSize(width: panelWidth, height: h))
+        }
     }
 
     @objc func doRedo() {
@@ -270,94 +412,211 @@ final class BubbleView: NSView, NSTextViewDelegate {
     }
 
     @objc func doClose() {
+        FileHandle.standardError.write("click close btn\n".data(using: .utf8)!)
         window?.orderOut(nil)
     }
 
     static func bodyFont() -> NSFont { .systemFont(ofSize: 14) }
 
-    static func measure(_ text: String, width: CGFloat) -> CGFloat {
-        let para = NSMutableParagraphStyle()
-        para.lineSpacing = 4
-        let attrs: [NSAttributedString.Key: Any] = [.font: bodyFont(), .paragraphStyle: para]
-        let rect = (text as NSString).boundingRect(
-            with: NSSize(width: width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attrs)
-        return ceil(rect.height)
+    static func measure(_ attr: NSAttributedString, width: CGFloat) -> CGFloat {
+        let box = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+        box.lineFragmentPadding = 0
+        let layout = NSLayoutManager()
+        layout.addTextContainer(box)
+        let storage = NSTextStorage(attributedString: attr)
+        storage.addLayoutManager(layout)
+        layout.ensureLayout(for: box)
+        return ceil(layout.usedRect(for: box).height)
     }
 
-    /// 词典块（单词模式）
-    private func dictText(_ r: Request) -> String {
-        guard r.mode == "word", !r.senses.isEmpty || !r.phonetic.isEmpty else { return "" }
-        var out = ""
-        if !r.phonetic.isEmpty { out += r.phonetic + "\n" }
-        for s in r.senses {
-            out += s.pos + " · " + s.defs.joined(separator: "；") + "\n"
+    /// 单词释义正文（有道那种：词性一行，释义按序号排，例句灰色斜体）
+    /// noun → n. / verb → v. 这类缩写，和有道词典一致
+    private func shortPos(_ pos: String) -> String {
+        switch pos.lowercased() {
+        case "noun": return "n."
+        case "verb": return "v."
+        case "adjective": return "adj."
+        case "adverb": return "adv."
+        case "preposition": return "prep."
+        case "pronoun": return "pron."
+        case "conjunction": return "conj."
+        case "interjection": return "int."
+        case "determiner": return "det."
+        case "numeral": return "num."
+        case "article": return "art."
+        case "abbreviation": return "abbr."
+        default: return pos
         }
-        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func wordBody(_ r: Request) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 5
+
+        if !r.text.isEmpty {
+            let lead = NSMutableParagraphStyle()
+            lead.lineSpacing = 4
+            lead.paragraphSpacing = 12
+            out.append(NSAttributedString(
+                string: r.text + "\n",
+                attributes: [.font: NSFont.systemFont(ofSize: 16, weight: .semibold),
+                             .foregroundColor: ink,
+                             .paragraphStyle: lead]))
+        }
+
+        let senses = expanded ? r.senses : Array(r.senses.prefix(2))
+        for s in senses {
+            let shownDefs = expanded ? s.defs : Array(s.defs.prefix(2))
+            let shownEx = expanded ? (s.examples ?? []) : Array((s.examples ?? []).prefix(1))
+            let posPara = NSMutableParagraphStyle()
+            posPara.lineSpacing = 3
+            posPara.paragraphSpacingBefore = 8
+            out.append(NSAttributedString(
+                string: shortPos(s.pos) + "\n",
+                attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                             .foregroundColor: NSColor(white: 0.62, alpha: 1),
+                             .paragraphStyle: posPara]))
+            for (i, def) in shownDefs.enumerated() {
+                out.append(NSAttributedString(
+                    string: "\(i + 1). " + def + "\n",
+                    attributes: [.font: NSFont.systemFont(ofSize: 12.5),
+                                 .foregroundColor: NSColor(white: 0.93, alpha: 1),
+                                 .paragraphStyle: para]))
+            }
+            for ex in shownEx {
+                out.append(NSAttributedString(
+                    string: "例：" + ex + "\n",
+                    attributes: [.font: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 11.5), toHaveTrait: .italicFontMask),
+                                 .foregroundColor: NSColor(white: 0.66, alpha: 1),
+                                 .paragraphStyle: para]))
+            }
+            out.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 6)]))
+        }
+        return out
     }
 
     /// 画内容并把面板高度返回给调用方
     @discardableResult
     func render(_ r: Request) -> CGFloat {
         current = r
-        header.stringValue = r.title
-        // 编辑框内容只在「用户没改过」时被覆盖，避免翻译回来的结果把用户正在改的文字冲掉
-        if !userEdited {
-            sourceView.string = r.source
-        }
+        if !userEdited { sourceView.string = r.source }
         redoBtn.title = "重新翻译"
         copyBtn.title = "复制译文"
         vocabBtn.title = "存生词"
 
-        let shown: String = r.loading ? "翻译中…" : (r.error ?? r.text)
         let bodyWidth = panelWidth - pad * 2
-        let dict = r.loading ? "" : dictText(r)
-        let bodyText = dict.isEmpty ? shown : shown + "\n\n" + dict
-        let textHeight = BubbleView.measure(bodyText, width: bodyWidth)
+        let isWord = r.mode == "word"
+        let sourceH: CGFloat = 34
 
-        let sourceH: CGFloat = 46
-        let chrome: CGFloat = pad + 16 + 8 + sourceH + 10 + 14 + pad + 26
-        var height = textHeight + chrome
-        height = min(max(height, 186), 540)
+        // 显示哪一组控件
+        for v in [header, headword, phonLabel, speakBtn, editBtn, starBtn, searchBtn, glyphBtn, xBtn, moreBtn, hair,
+                  copyBtn, vocabBtn, closeBtn] as [NSView] {
+            v.isHidden = true
+        }
+        header.isHidden = !isWord ? false : true
+        scroll.isHidden = false
+        sourceBox.isHidden = isWord && !editingSource
+        redoBtn.isHidden = isWord && !editingSource
+        editBtn.isHidden = !isWord
+
+        let hasMore = r.senses.count > 2
+            || r.senses.contains { $0.defs.count > 2 }
+            || r.senses.contains { ($0.examples ?? []).count > 1 }
+        moreBtn.isHidden = !(isWord && (hasMore || expanded))
+        moreBtn.title = expanded ? "收起 ‹" : "更多释义 ›"
+
+        let attr: NSAttributedString
+        if isWord {
+            headword.stringValue = r.source
+            headword.isHidden = false
+            let phs = r.phonetics ?? []
+            if phs.isEmpty {
+                phonLabel.stringValue = r.phonetic
+            } else {
+                phonLabel.stringValue = phs.map { p in
+                    p.label.isEmpty ? p.text : "\(p.label) \(p.text)"
+                }.joined(separator: "    ")
+            }
+            phonLabel.isHidden = phonLabel.stringValue.isEmpty
+            speakBtn.isHidden = false
+            for b in [starBtn, searchBtn, glyphBtn, xBtn] { b.isHidden = false }
+            hair.isHidden = false
+
+            attr = wordBody(r)
+        } else {
+            header.stringValue = r.title
+            header.isHidden = false
+            let shown: String = r.loading ? "翻译中…" : (r.error ?? r.text)
+            let para = NSMutableParagraphStyle()
+            para.lineSpacing = 4
+            attr = NSAttributedString(
+                string: shown,
+                attributes: [
+                    .font: BubbleView.bodyFont(),
+                    .foregroundColor: (r.error != nil) ? NSColor.systemRed : ink,
+                    .paragraphStyle: para,
+                ])
+            for b in [copyBtn, vocabBtn, closeBtn] { b.isHidden = false }
+        }
+
+        let textHeight = BubbleView.measure(attr, width: bodyWidth)
+        let wordSourceChrome: CGFloat = (isWord && editingSource) ? (8 + sourceH) : 0
+        let topChrome: CGFloat = isWord
+            ? (pad + 30 + 6 + 18 + 8 + wordSourceChrome + 10)
+            : (pad + 16 + 8 + sourceH + 10)
+        let bottomChrome: CGFloat = isWord ? (pad + 26) : (pad + 26 + pad / 2)
+        var height = topChrome + textHeight + bottomChrome
+        height = min(max(height, 160), 600)
 
         frame = NSRect(x: 0, y: 0, width: panelWidth, height: height)
-        header.frame = NSRect(x: pad, y: height - pad - 16, width: bodyWidth, height: 16)
-        sourceBox.frame = NSRect(x: pad, y: height - pad - 16 - 8 - sourceH, width: bodyWidth, height: sourceH)
-        sourceView.frame = NSRect(x: 0, y: 0, width: bodyWidth - 2, height: sourceH - 2)
 
-        let btnH: CGFloat = 26
-        let btnY = pad
-        closeBtn.frame = NSRect(x: panelWidth - pad - 52, y: btnY, width: 52, height: btnH)
-        vocabBtn.frame = NSRect(x: closeBtn.frame.minX - 8 - 66, y: btnY, width: 66, height: btnH)
-        redoBtn.frame = NSRect(x: vocabBtn.frame.minX - 8 - 78, y: btnY, width: 78, height: btnH)
-        copyBtn.frame = NSRect(x: redoBtn.frame.minX - 8 - 78, y: btnY, width: 78, height: btnH)
-        copyBtn.isHidden = r.loading || r.text.isEmpty
-        vocabBtn.isHidden = r.loading || r.text.isEmpty
+        if isWord {
+            let iconY = height - pad - 24
+            xBtn.frame = NSRect(x: panelWidth - pad - 22, y: iconY, width: 22, height: 22)
+            glyphBtn.frame = NSRect(x: xBtn.frame.minX - 6 - 22, y: iconY, width: 22, height: 22)
+            searchBtn.frame = NSRect(x: glyphBtn.frame.minX - 6 - 22, y: iconY, width: 22, height: 22)
+            starBtn.frame = NSRect(x: searchBtn.frame.minX - 6 - 22, y: iconY, width: 22, height: 22)
+            headword.frame = NSRect(x: pad, y: iconY - 4, width: starBtn.frame.minX - 12 - pad, height: 30)
 
-        let bodyTop = sourceBox.frame.minY - 10
-        let bodyBottom = btnY + btnH + 12
-        scroll.frame = NSRect(x: pad, y: bodyBottom, width: bodyWidth, height: max(20, bodyTop - bodyBottom))
+            let phonY = height - pad - 30 - 6 - 18
+            hair.frame = NSRect(x: pad, y: phonY - 10, width: bodyWidth, height: 1)
+            phonLabel.frame = NSRect(x: pad, y: phonY, width: bodyWidth - 26, height: 18)
+            let phonWidth = min(phonLabel.intrinsicContentSize.width, bodyWidth - 70)
+            speakBtn.frame = NSRect(x: pad + phonWidth + 8, y: phonY - 1, width: 20, height: 20)
+            editBtn.frame = NSRect(x: speakBtn.frame.maxX + 4, y: phonY - 1, width: 20, height: 20)
+            if editingSource {
+                sourceBox.frame = NSRect(x: pad, y: phonY - 8 - sourceH, width: bodyWidth, height: sourceH)
+                sourceView.frame = NSRect(x: 0, y: 0, width: bodyWidth - 2, height: sourceH - 2)
+            }
 
-        let para = NSMutableParagraphStyle()
-        para.lineSpacing = 4
-        let attr = NSMutableAttributedString(
-            string: shown,
-            attributes: [
-                .font: BubbleView.bodyFont(),
-                .foregroundColor: (r.error != nil) ? NSColor.systemRed : ink,
-                .paragraphStyle: para,
-            ])
-        if !dict.isEmpty {
-            attr.append(NSAttributedString(string: "\n\n"))
-            attr.append(NSAttributedString(
-                string: dict,
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 12),
-                    .foregroundColor: NSColor(white: 0.78, alpha: 1),
-                    .paragraphStyle: para,
-                ]))
+            let btnY = pad
+
+            moreBtn.frame = NSRect(x: panelWidth - pad - 110, y: btnY, width: 110, height: 26)
+            moreBtn.alignment = .right
+            redoBtn.frame = NSRect(x: pad, y: btnY, width: 78, height: 26)
+
+            let bodyBottom = btnY + 26 + 10
+            let bodyTop = (editingSource ? sourceBox.frame.minY : phonY) - 16
+            scroll.frame = NSRect(x: pad, y: bodyBottom, width: bodyWidth, height: max(24, bodyTop - bodyBottom))
+        } else {
+            header.frame = NSRect(x: pad, y: height - pad - 16, width: bodyWidth, height: 16)
+            sourceBox.frame = NSRect(x: pad, y: height - pad - 16 - 8 - sourceH, width: bodyWidth, height: sourceH)
+            sourceView.frame = NSRect(x: 0, y: 0, width: bodyWidth - 2, height: sourceH - 2)
+
+            let btnY = pad
+            closeBtn.frame = NSRect(x: panelWidth - pad - 52, y: btnY, width: 52, height: 26)
+            vocabBtn.frame = NSRect(x: closeBtn.frame.minX - 8 - 66, y: btnY, width: 66, height: 26)
+            redoBtn.frame = NSRect(x: vocabBtn.frame.minX - 8 - 78, y: btnY, width: 78, height: 26)
+            copyBtn.frame = NSRect(x: redoBtn.frame.minX - 8 - 78, y: btnY, width: 78, height: 26)
+            copyBtn.isHidden = r.loading || r.text.isEmpty
+            vocabBtn.isHidden = r.loading || r.text.isEmpty
+
+            let bodyBottom = btnY + 26 + 12
+            let bodyTop = sourceBox.frame.minY - 10
+            scroll.frame = NSRect(x: pad, y: bodyBottom, width: bodyWidth, height: max(20, bodyTop - bodyBottom))
         }
+
         body.textStorage?.setAttributedString(attr)
         return height
     }
@@ -450,6 +709,7 @@ func presentIcon(_ r: Request) {
     hideTimer?.invalidate()
     panel.orderOut(nil)
     place(iconPanel, width: iconSize, height: iconSize, anchoredAt: r, offsetX: 6, above: false)
+    FileHandle.standardError.write("icon frame \(iconPanel.frame)\n".data(using: .utf8)!)
 }
 
 func present(_ r: Request) {
@@ -459,6 +719,7 @@ func present(_ r: Request) {
     hideTimer?.invalidate()
     let height = view.render(r)
     place(panel, width: panelWidth, height: height, anchoredAt: r, offsetX: 10, above: true)
+    FileHandle.standardError.write("panel frame \(panel.frame) screen \(panel.screen?.frame.debugDescription ?? "?")\n".data(using: .utf8)!)
     if !r.loading {
         hideTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { _ in
             panel.orderOut(nil)

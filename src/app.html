@@ -361,6 +361,15 @@ function switchTab(tab) {
   if (tab === 'translate') setTimeout(() => $('src').focus(), 30);
 }
 window.__switchTab = switchTab;
+/// 划词卡片「查词」按钮：把词填进输入框并直接翻译
+window.__setSource = (word) => {
+  const box = $('src');
+  if (!box) return;
+  box.value = word || '';
+  box.dispatchEvent(new Event('input'));
+  switchTab('translate');
+  if (word) setTimeout(() => doTranslate(), 60);
+};
 
 document.querySelectorAll('.nav').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 
@@ -712,7 +721,7 @@ $('openInput').addEventListener('click', () => invoke('open_input_settings'));
 // ---------- 启动 ----------
 (async () => {
   await loadSettings();
-  $('ver').textContent = '0.6.0';
+  $('ver').textContent = '0.6.1';
   updateCount();
   const tab = new URLSearchParams(location.search).get('tab');
   switchTab(tab || 'translate');

@@ -4,7 +4,7 @@
 //! 单词再补一份词典释义 → 把结果推回助手。
 //! 非 macOS（Windows/Linux）走原来的 webview 气泡，逻辑在同名函数里分支。
 
-use crate::bubble_helper::Sense;
+use crate::bubble_helper::{Phonetic, Sense};
 use std::thread;
 use tauri::{AppHandle, Manager};
 
@@ -44,6 +44,7 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
         if word_mode { "word".into() } else { "sentence".into() },
         String::new(),
         Vec::new(),
+        Vec::new(),
         lx,
         ly,
     );
@@ -52,23 +53,28 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
     match crate::translate::run(&source, &cfg) {
         Ok(t) => {
             crate::history::record(&t);
-            let (mode, phonetic, senses) = if word_mode {
+            let (mode, phonetic, phonetics, senses) = if word_mode {
                 match crate::translate::lookup(&source) {
                     Ok(d) => (
                         "word".to_string(),
                         d.phonetic,
+                        d.phonetics
+                            .into_iter()
+                            .map(|p| Phonetic { label: p.label, text: p.text })
+                            .collect(),
                         d.senses
                             .into_iter()
                             .map(|s| Sense {
                                 pos: s.pos,
                                 defs: s.defs,
+                                examples: s.examples,
                             })
                             .collect(),
                     ),
-                    Err(_) => ("sentence".to_string(), String::new(), Vec::new()),
+                    Err(_) => ("sentence".to_string(), String::new(), Vec::new(), Vec::new()),
                 }
             } else {
-                ("sentence".to_string(), String::new(), Vec::new())
+                ("sentence".to_string(), String::new(), Vec::new(), Vec::new())
             };
             let _ = crate::bubble_helper::show_panel(
                 panel_title(&t.detected, &t.target, &t.provider),
@@ -78,6 +84,7 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
                 None,
                 mode,
                 phonetic,
+                phonetics,
                 senses,
                 lx,
                 ly,
@@ -92,6 +99,7 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
                 Some(e),
                 "sentence".into(),
                 String::new(),
+                Vec::new(),
                 Vec::new(),
                 lx,
                 ly,

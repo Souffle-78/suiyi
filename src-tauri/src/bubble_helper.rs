@@ -16,6 +16,14 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 pub struct Sense {
     pub pos: String,
     pub defs: Vec<String>,
+    #[serde(default)]
+    pub examples: Vec<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct Phonetic {
+    pub label: String,
+    pub text: String,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -31,6 +39,8 @@ struct Request {
     /// "word" = 单词（带词典），"sentence" = 句子
     mode: String,
     phonetic: String,
+    #[serde(default)]
+    phonetics: Vec<Phonetic>,
     senses: Vec<Sense>,
     x: f64,
     y: f64,
@@ -97,10 +107,24 @@ pub fn ensure_running() -> bool {
         return false;
     };
     let _ = std::fs::remove_file(dir().join("bubble-shutdown"));
-    match std::process::Command::new(&path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+    // 助手自己的 stderr 落到 suiyi.log，方便排查划词卡片问题
+    let helper_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir().join("helper.log"))
+        .ok();
+    let mut cmd = std::process::Command::new(&path);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+    if let Some(f) = helper_log {
+        let f2 = f.try_clone().ok();
+        cmd.stderr(std::process::Stdio::from(f));
+        if let Some(f2) = f2 {
+            cmd.stdout(std::process::Stdio::from(f2));
+        }
+    } else {
+        cmd.stderr(std::process::Stdio::null());
+    }
+    match cmd
         .spawn()
     {
         Ok(child) => {
@@ -158,6 +182,7 @@ pub fn show_icon(source: &str, x: f64, y: f64) -> bool {
         error: None,
         mode: "sentence".into(),
         phonetic: String::new(),
+        phonetics: Vec::new(),
         senses: Vec::new(),
         x,
         y,
@@ -175,6 +200,7 @@ pub fn show_panel(
     error: Option<String>,
     mode: String,
     phonetic: String,
+    phonetics: Vec<Phonetic>,
     senses: Vec<Sense>,
     x: f64,
     y: f64,
@@ -192,6 +218,7 @@ pub fn show_panel(
         error,
         mode,
         phonetic,
+        phonetics,
         senses,
         x,
         y,
@@ -253,6 +280,14 @@ pub fn start_action_watcher(app: tauri::AppHandle) {
                     Err(e) => crate::log::line(format!("bubble: vocab save failed: {e}")),
                 },
                 "copy" => crate::log::line("bubble: copied translation"),
+                "open_main" => {
+                    let word = source.trim().to_string();
+                    if word.is_empty() {
+                        continue;
+                    }
+                    crate::log::line(format!("bubble action: open_main ({})", word.len()));
+                    crate::open_main_with_word(&app, &word);
+                }
                 other => crate::log::line(format!("bubble: unknown action {other}")),
             }
         }
@@ -285,6 +320,7 @@ pub fn show_panel(
     _error: Option<String>,
     _mode: String,
     _phonetic: String,
+    _phonetics: Vec<Phonetic>,
     _senses: Vec<Sense>,
     _x: f64,
     _y: f64,

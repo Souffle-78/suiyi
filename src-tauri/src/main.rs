@@ -903,6 +903,15 @@ fn hide_bubble_if_outside(app: &AppHandle, x: f64, y: f64) {
     }
 }
 
+/// 从划词卡片点「查词」：打开主窗口并把这个词填进输入框
+pub fn open_main_with_word(app: &AppHandle, word: &str) {
+    open_app(app, "translate");
+    let payload = serde_json::to_string(word).unwrap_or_else(|_| "\"\"".into());
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.eval(&format!("window.__setSource && window.__setSource({payload})"));
+    }
+}
+
 #[tauri::command]
 fn open_permission_settings() {
     permissions::open_settings();
@@ -943,6 +952,8 @@ fn main() {
     if let Ok(mode) = std::env::var("SUIYI_PROBE") {
         if mode == "autostart" {
             // 交给 setup 里的自检分支处理（需要 AppHandle）
+        } else if mode == "icon" {
+            // 交给 setup 里的自检分支处理（直接让助手弹出划词图标）
         } else if mode == "bubble" {
             // 交给 setup 里的自检分支处理（需要拿到窗口）
         } else if mode == "vocab" {
@@ -1024,7 +1035,7 @@ fn main() {
             }
             return;
         }
-        if mode != "autostart" && mode != "bubble" && mode != "bubbleshow" {
+        if mode != "autostart" && mode != "bubble" && mode != "bubbleshow" && mode != "icon" {
             let cfg = config::load();
             println!("provider={} target={}", cfg.provider, cfg.target);
             match translate::run("Hello world, this is a quick probe.", &cfg) {
@@ -1069,6 +1080,21 @@ fn main() {
             app.manage(shared_setup.clone());
             bubble_helper::start_action_watcher(app.handle().clone());
             bubble_helper::ensure_running();
+
+            // 自检：SUIYI_PROBE=icon ./suiyi —— 直接让助手弹一个单词卡片的小图标，
+            // 方便在没人手动划词时验证卡片交互（不依赖真实选区）。
+            #[cfg(target_os = "macos")]
+            if std::env::var("SUIYI_PROBE").as_deref() == Ok("icon") {
+                let word = std::env::var("SUIYI_PROBE_WORD").unwrap_or_else(|_| "resilient".into());
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(800));
+                    if bubble_helper::show_icon(&word, 640.0, 360.0) {
+                        log::line(format!("probe icon shown for {word}"));
+                    } else {
+                        log::line("probe icon failed");
+                    }
+                });
+            }
 
             // macOS 上 webview 气泡已退役（改用助手进程），这里不再给它设置浮层行为，
             // 否则那套「+1s 重新应用 + orderFrontRegardless」会把隐藏的气泡窗口顶上来。
@@ -1323,6 +1349,7 @@ fn main() {
                         None,
                         "sentence".into(),
                         String::new(),
+                        Vec::new(),
                         Vec::new(),
                         lx as f64,
                         ly as f64,

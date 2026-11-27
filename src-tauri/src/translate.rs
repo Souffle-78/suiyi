@@ -319,12 +319,23 @@ mod tests {
 pub struct DictSense {
     pub pos: String,
     pub defs: Vec<String>,
+    #[serde(default)]
+    pub examples: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct Phonetic {
+    /// 英 / 美 / 空（没标出来就不打标签）
+    pub label: String,
+    pub text: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
 pub struct DictEntry {
     pub word: String,
     pub phonetic: String,
+    #[serde(default)]
+    pub phonetics: Vec<Phonetic>,
     pub senses: Vec<DictSense>,
     pub example: String,
 }
@@ -366,26 +377,56 @@ pub fn parse_dictionary(data: &serde_json::Value) -> Option<DictEntry> {
         })
         .unwrap_or_default();
 
+    // 音标：dictionaryapi 会把英/美分开给（audio 里带 -uk / -us），按出现顺序去重
+    let mut phonetics: Vec<Phonetic> = Vec::new();
+    if let Some(arr) = first.get("phonetics").and_then(|v| v.as_array()) {
+        for p in arr {
+            let Some(text) = p.get("text").and_then(|t| t.as_str()) else { continue };
+            let text = text.trim().to_string();
+            if text.is_empty() || phonetics.iter().any(|x| x.text == text) {
+                continue;
+            }
+            let audio = p.get("audio").and_then(|a| a.as_str()).unwrap_or("");
+            let label = if audio.contains("-uk") {
+                "英"
+            } else if audio.contains("-us") {
+                "美"
+            } else {
+                ""
+            };
+            phonetics.push(Phonetic { label: label.to_string(), text });
+        }
+    }
+
+    // 有的词条只给一个顶层 phonetic，没有再分条目；退回到它，保证卡片上有音标
+    if phonetics.is_empty() && !phonetic.is_empty() {
+        phonetics.push(Phonetic { label: String::new(), text: phonetic.clone() });
+    }
+
     let mut senses = Vec::new();
     let mut example = String::new();
     if let Some(meanings) = first.get("meanings").and_then(|v| v.as_array()) {
         for m in meanings.iter().take(4) {
             let pos = m.get("partOfSpeech").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mut defs = Vec::new();
+            let mut examples = Vec::new();
             if let Some(items) = m.get("definitions").and_then(|v| v.as_array()) {
-                for d in items.iter().take(3) {
+                for d in items.iter().take(4) {
                     if let Some(text) = d.get("definition").and_then(|v| v.as_str()) {
                         defs.push(text.to_string());
                     }
-                    if example.is_empty() {
-                        if let Some(ex) = d.get("example").and_then(|v| v.as_str()) {
+                    if let Some(ex) = d.get("example").and_then(|v| v.as_str()) {
+                        if examples.len() < 2 {
+                            examples.push(ex.to_string());
+                        }
+                        if example.is_empty() {
                             example = ex.to_string();
                         }
                     }
                 }
             }
             if !defs.is_empty() {
-                senses.push(DictSense { pos, defs });
+                senses.push(DictSense { pos, defs, examples });
             }
             if senses.len() >= 3 {
                 break;
@@ -395,5 +436,5 @@ pub fn parse_dictionary(data: &serde_json::Value) -> Option<DictEntry> {
     if senses.is_empty() {
         return None;
     }
-    Some(DictEntry { word, phonetic, senses, example })
+    Some(DictEntry { word, phonetic, phonetics, senses, example })
 }
