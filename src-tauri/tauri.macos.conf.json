@@ -1,7 +1,8 @@
 {
   "bundle": {
     "resources": [
-      "helper/bin/suiyi-helper"
+      "helper/bin/suiyi-helper",
+      "resources/ecdict.sqlite"
     ]
   }
 }

@@ -57,6 +57,8 @@ struct Request: Decodable {
     var mode: String
     var phonetic: String
     var phonetics: [PhoneticLite]?
+    var tags: [String]?
+    var ai: String?
     var senses: [Sense]
     var x: Double
     var y: Double
@@ -189,6 +191,8 @@ final class BubbleView: NSView, NSTextViewDelegate {
     let headword = NSTextField(labelWithString: "")
     let phonLabel = NSTextField(labelWithString: "")
     let speakBtn = NSButton(title: "", target: nil, action: nil)
+    let tagsLabel = NSTextField(labelWithString: "")
+    let aiBtn = NSButton(title: "", target: nil, action: nil)
     let editBtn = NSButton(title: "", target: nil, action: nil)
     let searchBtn = NSButton(title: "", target: nil, action: nil)
     let hair = NSView()
@@ -253,6 +257,16 @@ final class BubbleView: NSView, NSTextViewDelegate {
         speakBtn.target = self
         speakBtn.action = #selector(doSpeak)
         addSubview(speakBtn)
+        tagsLabel.font = .systemFont(ofSize: 10.5)
+        tagsLabel.textColor = NSColor(white: 0.55, alpha: 1)
+        tagsLabel.isHidden = true
+        addSubview(tagsLabel)
+        aiBtn.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "AI 精解")
+        aiBtn.isBordered = false
+        aiBtn.contentTintColor = NSColor(white: 0.86, alpha: 1)
+        aiBtn.target = self
+        aiBtn.action = #selector(doAI)
+        addSubview(aiBtn)
 
         editBtn.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "编辑原文")
         editBtn.imagePosition = .imageOnly
@@ -339,6 +353,12 @@ final class BubbleView: NSView, NSTextViewDelegate {
         vocabBtn.title = "已存入"
         starBtn.contentTintColor = NSColor.systemYellow
         writeAction("vocab", source: sourceView.string, text: r.text, x: r.x, y: r.y)
+    }
+
+    @objc func doAI() {
+        guard let r = current else { return }
+        aiBtn.contentTintColor = NSColor.systemTeal
+        writeAction("ai", source: r.source, text: r.text, x: r.x, y: r.y)
     }
 
     @objc func doSearch() {
@@ -466,10 +486,9 @@ final class BubbleView: NSView, NSTextViewDelegate {
                              .paragraphStyle: lead]))
         }
 
-        // 中文释义：一行一个词性，「n. 行动；行为；战斗」这种词组式，扫一眼就懂
+        // 中文释义：一行一个词性，全部给出来，卡片内部滚动
         let zhSenses = r.senses.filter { $0.zh == true }
         if !zhSenses.isEmpty {
-            // 中文释义：全部给出来，卡片内部滚动，不再截断成「…」
             for s in zhSenses {
                 let head = s.pos.isEmpty ? "" : shortPos(s.pos) + " "
                 let line = head + s.defs.joined(separator: "；")
@@ -481,46 +500,61 @@ final class BubbleView: NSView, NSTextViewDelegate {
                     attributes: [.font: NSFont.systemFont(ofSize: 12.5),
                                  .foregroundColor: NSColor(white: 0.93, alpha: 1),
                                  .paragraphStyle: p2])
-                if !s.pos.isEmpty, let r = str.string.range(of: head) {
+                if !s.pos.isEmpty, let r0 = str.string.range(of: head) {
                     str.addAttribute(.foregroundColor,
                                      value: NSColor(white: 0.60, alpha: 1),
-                                     range: NSRange(r, in: str.string))
+                                     range: NSRange(r0, in: str.string))
                     str.addAttribute(.font,
                                      value: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
-                                     range: NSRange(r, in: str.string))
+                                     range: NSRange(r0, in: str.string))
                 }
                 out.append(str)
             }
-            return out
+        } else {
+            // 英英兜底：编号释义 + 例句（只有拿不到中文释义时才走这里）
+            let senses = expanded ? r.senses : Array(r.senses.prefix(2))
+            for s in senses {
+                let shownDefs = expanded ? s.defs : Array(s.defs.prefix(2))
+                let shownEx = expanded ? (s.examples ?? []) : Array((s.examples ?? []).prefix(1))
+                let posPara = NSMutableParagraphStyle()
+                posPara.lineSpacing = 2
+                posPara.paragraphSpacingBefore = 6
+                out.append(NSAttributedString(
+                    string: shortPos(s.pos) + "\n",
+                    attributes: [.font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
+                                 .foregroundColor: NSColor(white: 0.62, alpha: 1),
+                                 .paragraphStyle: posPara]))
+                for (i, def) in shownDefs.enumerated() {
+                    out.append(NSAttributedString(
+                        string: "\(i + 1). " + def + "\n",
+                        attributes: [.font: NSFont.systemFont(ofSize: 12),
+                                     .foregroundColor: NSColor(white: 0.93, alpha: 1),
+                                     .paragraphStyle: para]))
+                }
+                for ex in shownEx {
+                    out.append(NSAttributedString(
+                        string: "例：" + ex + "\n",
+                        attributes: [.font: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 11), toHaveTrait: .italicFontMask),
+                                     .foregroundColor: NSColor(white: 0.66, alpha: 1),
+                                     .paragraphStyle: para]))
+                }
+            }
         }
 
-        // 英英兜底：保持编号 + 例句
-        let senses = expanded ? r.senses : Array(r.senses.prefix(2))
-        for s in senses {
-            let shownDefs = expanded ? s.defs : Array(s.defs.prefix(2))
-            let shownEx = expanded ? (s.examples ?? []) : Array((s.examples ?? []).prefix(1))
-            let posPara = NSMutableParagraphStyle()
-            posPara.lineSpacing = 2
-            posPara.paragraphSpacingBefore = 6
+        if let ai = r.ai, !ai.isEmpty {
+            let p3 = NSMutableParagraphStyle()
+            p3.lineSpacing = 3
+            p3.paragraphSpacingBefore = 12
             out.append(NSAttributedString(
-                string: shortPos(s.pos) + "\n",
-                attributes: [.font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
-                             .foregroundColor: NSColor(white: 0.62, alpha: 1),
-                             .paragraphStyle: posPara]))
-            for (i, def) in shownDefs.enumerated() {
-                out.append(NSAttributedString(
-                    string: "\(i + 1). " + def + "\n",
-                    attributes: [.font: NSFont.systemFont(ofSize: 12),
-                                 .foregroundColor: NSColor(white: 0.93, alpha: 1),
-                                 .paragraphStyle: para]))
-            }
-            for ex in shownEx {
-                out.append(NSAttributedString(
-                    string: "例：" + ex + "\n",
-                    attributes: [.font: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 11), toHaveTrait: .italicFontMask),
-                                 .foregroundColor: NSColor(white: 0.66, alpha: 1),
-                                 .paragraphStyle: para]))
-            }
+                string: "AI 精解\n",
+                attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                             .foregroundColor: NSColor.systemTeal,
+                             .paragraphStyle: p3]))
+            out.append(NSAttributedString(
+                string: ai + "\n",
+                attributes: [.font: NSFont.systemFont(ofSize: 12.5),
+                             .foregroundColor: NSColor(white: 0.92, alpha: 1),
+                             .paragraphStyle: para]))
         }
         return out
     }
@@ -539,7 +573,7 @@ final class BubbleView: NSView, NSTextViewDelegate {
         let sourceH: CGFloat = 34
 
         // 显示哪一组控件
-        for v in [header, headword, phonLabel, speakBtn, editBtn, starBtn, searchBtn, glyphBtn, xBtn, moreBtn, hair,
+        for v in [header, headword, phonLabel, speakBtn, tagsLabel, aiBtn, editBtn, starBtn, searchBtn, glyphBtn, xBtn, moreBtn, hair,
                   copyBtn, vocabBtn, closeBtn] as [NSView] {
             v.isHidden = true
         }
@@ -569,8 +603,11 @@ final class BubbleView: NSView, NSTextViewDelegate {
                 }.joined(separator: "    ")
             }
             phonLabel.isHidden = phonLabel.stringValue.isEmpty
+            let tags = r.tags ?? []
+            tagsLabel.stringValue = tags.isEmpty ? "" : tags.joined(separator: " · ")
+            tagsLabel.isHidden = tags.isEmpty
             speakBtn.isHidden = false
-            for b in [starBtn, searchBtn, glyphBtn, xBtn] { b.isHidden = false }
+            for b in [aiBtn, starBtn, searchBtn, glyphBtn, xBtn] { b.isHidden = false }
             hair.isHidden = false
 
             attr = wordBody(r)
@@ -592,8 +629,9 @@ final class BubbleView: NSView, NSTextViewDelegate {
 
         let textHeight = BubbleView.measure(attr, width: bodyWidth)
         let wordSourceChrome: CGFloat = (isWord && editingSource) ? (8 + sourceH) : 0
+        let tagsExtra: CGFloat = (isWord && !tagsLabel.isHidden) ? 16 : 0
         let topChrome: CGFloat = isWord
-            ? (pad + 30 + 6 + 18 + 8 + wordSourceChrome + 10)
+            ? (pad + 30 + 6 + 18 + tagsExtra + 8 + wordSourceChrome + 10)
             : (pad + 16 + 8 + sourceH + 10)
         let bottomChrome: CGFloat = isWord ? (pad + 26) : (pad + 26 + pad / 2)
         var height = topChrome + textHeight + bottomChrome
@@ -607,10 +645,13 @@ final class BubbleView: NSView, NSTextViewDelegate {
             glyphBtn.frame = NSRect(x: xBtn.frame.minX - 6 - 22, y: iconY, width: 22, height: 22)
             searchBtn.frame = NSRect(x: glyphBtn.frame.minX - 6 - 22, y: iconY, width: 22, height: 22)
             starBtn.frame = NSRect(x: searchBtn.frame.minX - 6 - 22, y: iconY, width: 22, height: 22)
-            headword.frame = NSRect(x: pad, y: iconY - 4, width: starBtn.frame.minX - 12 - pad, height: 30)
+            aiBtn.frame = NSRect(x: starBtn.frame.minX - 6 - 22, y: iconY, width: 22, height: 22)
+            headword.frame = NSRect(x: pad, y: iconY - 4, width: aiBtn.frame.minX - 12 - pad, height: 30)
 
             let phonY = height - pad - 30 - 6 - 18
-            hair.frame = NSRect(x: pad, y: phonY - 10, width: bodyWidth, height: 1)
+            let tagsH: CGFloat = tagsLabel.isHidden ? 0 : 16
+            tagsLabel.frame = NSRect(x: pad, y: phonY - 4 - 14, width: bodyWidth, height: 14)
+            hair.frame = NSRect(x: pad, y: phonY - 10 - tagsH, width: bodyWidth, height: 1)
             phonLabel.frame = NSRect(x: pad, y: phonY, width: bodyWidth - 26, height: 18)
             let phonWidth = min(phonLabel.intrinsicContentSize.width, bodyWidth - 70)
             speakBtn.frame = NSRect(x: pad + phonWidth + 8, y: phonY - 1, width: 20, height: 20)
@@ -627,7 +668,7 @@ final class BubbleView: NSView, NSTextViewDelegate {
             redoBtn.frame = NSRect(x: pad, y: btnY, width: 78, height: 26)
 
             let bodyBottom = btnY + 26 + 10
-            let bodyTop = (editingSource ? sourceBox.frame.minY : phonY) - 16
+            let bodyTop = (editingSource ? sourceBox.frame.minY : phonY - tagsH) - 16
             let bodyHeight = max(24, bodyTop - bodyBottom)
             scroll.frame = NSRect(x: pad, y: bodyBottom, width: bodyWidth, height: bodyHeight)
             body.frame = NSRect(x: 0, y: 0, width: bodyWidth, height: max(textHeight, bodyHeight))

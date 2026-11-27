@@ -11,6 +11,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 #[derive(serde::Serialize, Clone)]
 pub struct Sense {
@@ -43,12 +44,19 @@ struct Request {
     phonetic: String,
     #[serde(default)]
     phonetics: Vec<Phonetic>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    ai: Option<String>,
     senses: Vec<Sense>,
     x: f64,
     y: f64,
 }
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 最近一次推给助手的请求，供「AI 精解」在原文基础上补充内容。
+static LAST_REQ: Mutex<Option<Request>> = Mutex::new(None);
 static STARTED: AtomicBool = AtomicBool::new(false);
 static LAST_ACTION_TS: AtomicI64 = AtomicI64::new(0);
 
@@ -160,7 +168,28 @@ fn write_request(req: &Request) -> bool {
         Ok(())
     })();
     match ok {
-        Ok(()) => true,
+        Ok(()) => {
+            if let Ok(mut slot) = LAST_REQ.lock() {
+                *slot = Some(Request {
+                    seq: req.seq,
+                    phase: req.phase.clone(),
+                    title: req.title.clone(),
+                    source: req.source.clone(),
+                    text: req.text.clone(),
+                    loading: req.loading,
+                    error: req.error.clone(),
+                    mode: req.mode.clone(),
+                    phonetic: req.phonetic.clone(),
+                    phonetics: req.phonetics.clone(),
+                    tags: req.tags.clone(),
+                    ai: req.ai.clone(),
+                    senses: req.senses.clone(),
+                    x: req.x,
+                    y: req.y,
+                });
+            }
+            true
+        }
         Err(e) => {
             crate::log::line(format!("bubble request write failed: {e}"));
             false
@@ -185,6 +214,8 @@ pub fn show_icon(source: &str, x: f64, y: f64) -> bool {
         mode: "sentence".into(),
         phonetic: String::new(),
         phonetics: Vec::new(),
+        tags: Vec::new(),
+        ai: None,
         senses: Vec::new(),
         x,
         y,
@@ -203,6 +234,8 @@ pub fn show_panel(
     mode: String,
     phonetic: String,
     phonetics: Vec<Phonetic>,
+    tags: Vec<String>,
+    ai: Option<String>,
     senses: Vec<Sense>,
     x: f64,
     y: f64,
@@ -221,6 +254,8 @@ pub fn show_panel(
         mode,
         phonetic,
         phonetics,
+        tags,
+        ai,
         senses,
         x,
         y,
@@ -282,6 +317,31 @@ pub fn start_action_watcher(app: tauri::AppHandle) {
                     Err(e) => crate::log::line(format!("bubble: vocab save failed: {e}")),
                 },
                 "copy" => crate::log::line("bubble: copied translation"),
+                "ai" => {
+                    let word = source.trim().to_string();
+                    if word.is_empty() {
+                        continue;
+                    }
+                    crate::log::line(format!("bubble action: ai ({})", word.len()));
+                    let base = LAST_REQ.lock().ok().and_then(|g| g.clone());
+                    std::thread::spawn(move || {
+                        let result = crate::ai::explain(&word);
+                        let Some(mut req) = base else { return };
+                        match result {
+                            Ok(ai) => {
+                                crate::log::line("bubble: ai explain ok");
+                                req.ai = Some(ai);
+                            }
+                            Err(e) => {
+                                crate::log::line(format!("bubble: ai explain failed: {e}"));
+                                req.ai = Some(format!("AI 精解失败：{e}"));
+                            }
+                        }
+                        req.seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+                        req.loading = false;
+                        write_request(&req);
+                    });
+                }
                 "open_main" => {
                     let word = source.trim().to_string();
                     if word.is_empty() {
@@ -323,6 +383,8 @@ pub fn show_panel(
     _mode: String,
     _phonetic: String,
     _phonetics: Vec<Phonetic>,
+    _tags: Vec<String>,
+    _ai: Option<String>,
     _senses: Vec<Sense>,
     _x: f64,
     _y: f64,

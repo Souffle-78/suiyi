@@ -45,6 +45,8 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
         String::new(),
         Vec::new(),
         Vec::new(),
+        None,
+        Vec::new(),
         lx,
         ly,
     );
@@ -53,9 +55,10 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
     match crate::translate::run(&source, &cfg) {
         Ok(t) => {
             crate::history::record(&t);
-            let (mode, phonetic, phonetics, senses) = if word_mode {
-                // 先拿中文释义（有道），拿不到再退回英英词典
+            let (mode, phonetic, phonetics, senses, tags) = if word_mode {
+                let local = crate::dict_local::lookup(&source);
                 if let Some(z) = crate::translate::zh_lookup(&source) {
+                    // 在线释义更全更口语，优先；音标/考试标签用本地库补齐
                     let mut ph = Vec::new();
                     if !z.uk.is_empty() {
                         ph.push(Phonetic { label: "英".into(), text: format!("/{}/", z.uk) });
@@ -63,13 +66,33 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
                     if !z.us.is_empty() && z.us != z.uk {
                         ph.push(Phonetic { label: "美".into(), text: format!("/{}/", z.us) });
                     }
+                    if ph.is_empty() {
+                        if let Some(l) = &local {
+                            if !l.phonetic.is_empty() {
+                                ph.push(Phonetic { label: String::new(), text: format!("/{}/", l.phonetic) });
+                            }
+                        }
+                    }
                     let phonetic = ph.first().map(|p| p.text.clone()).unwrap_or_default();
                     let senses = z
                         .senses
                         .into_iter()
                         .map(|s| Sense { pos: s.pos, defs: s.defs, examples: s.examples, zh: s.zh })
                         .collect::<Vec<_>>();
-                    ("word".to_string(), phonetic, ph, senses)
+                    let tags = local.as_ref().map(|l| l.tags.clone()).unwrap_or_default();
+                    ("word".to_string(), phonetic, ph, senses, tags)
+                } else if let Some(l) = local {
+                    // 断网 / 有道没收录：直接用内置词库
+                    let mut ph = Vec::new();
+                    if !l.phonetic.is_empty() {
+                        ph.push(Phonetic { label: String::new(), text: format!("/{}/", l.phonetic) });
+                    }
+                    let phonetic = ph.first().map(|p| p.text.clone()).unwrap_or_default();
+                    let senses = crate::dict_local::senses_of(&l)
+                        .into_iter()
+                        .map(|(pos, items)| Sense { pos, defs: items, examples: Vec::new(), zh: true })
+                        .collect::<Vec<_>>();
+                    ("word".to_string(), phonetic, ph, senses, l.tags.clone())
                 } else {
                     match crate::translate::lookup(&source) {
                         Ok(d) => (
@@ -81,19 +104,16 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
                                 .collect(),
                             d.senses
                                 .into_iter()
-                                .map(|s| Sense {
-                                    pos: s.pos,
-                                    defs: s.defs,
-                                    examples: s.examples,
-                                    zh: s.zh,
-                                })
+                                .map(|s| Sense { pos: s.pos, defs: s.defs, examples: s.examples, zh: s.zh })
                                 .collect(),
+                            Vec::new(),
                         ),
-                        Err(_) => ("sentence".to_string(), String::new(), Vec::new(), Vec::new()),
+                        Err(_) => ("sentence".to_string(), String::new(), Vec::new(), Vec::new(), Vec::new()),
                     }
                 }
             } else {
-                ("sentence".to_string(), String::new(), Vec::new(), Vec::new())
+                let none = Vec::new();
+                ("sentence".to_string(), String::new(), Vec::new(), none, Vec::new())
             };
             let _ = crate::bubble_helper::show_panel(
                 panel_title(&t.detected, &t.target, &t.provider),
@@ -104,6 +124,8 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
                 mode,
                 phonetic,
                 phonetics,
+                tags,
+                None,
                 senses,
                 lx,
                 ly,
@@ -119,6 +141,8 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
                 "sentence".into(),
                 String::new(),
                 Vec::new(),
+                Vec::new(),
+                None,
                 Vec::new(),
                 lx,
                 ly,

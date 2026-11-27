@@ -10,7 +10,9 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::menu::MenuItemKind;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
+mod ai;
 mod bubble_helper;
+mod dict_local;
 mod capture;
 mod config;
 mod history;
@@ -52,6 +54,13 @@ fn sync_tray_label(app: &AppHandle, enabled: bool) {
             let _ = item.set_text(if enabled { "暂停划词" } else { "开启划词" });
         }
     }
+}
+
+#[tauri::command]
+async fn ai_explain(word: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::ai::explain(&word))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1087,6 +1096,11 @@ fn main() {
             }
             // 之前这里设成 Accessory（无 Dock 图标），菜单栏图标一隐藏，用户就完全找不到入口，
             // 表现成「打不开、卡在后台」。改成普通应用：有 Dock 图标，关窗口只是隐藏。
+            // 内置离线词库（resources/ecdict.sqlite），查不到在线释义时兜底
+            if let Ok(dir) = app.path().resource_dir() {
+                dict_local::init(dir);
+            }
+
             // 命令里用 State<Arc<Shared>> 读开关状态，必须先托管
             app.manage(shared_setup.clone());
             bubble_helper::start_action_watcher(app.handle().clone());
@@ -1362,6 +1376,8 @@ fn main() {
                         String::new(),
                         Vec::new(),
                         Vec::new(),
+                        None,
+                        Vec::new(),
                         lx as f64,
                         ly as f64,
                     );
@@ -1403,6 +1419,7 @@ fn main() {
             translate_text,
             lookup_word,
             close_main_window,
+            ai_explain,
             list_history,
             clear_history,
             add_vocab,
