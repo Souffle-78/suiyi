@@ -126,6 +126,16 @@ static SHOW_GEN: AtomicU64 = AtomicU64::new(0);
 /// 最近一次气泡内容：窗口刚创建时 emit 会丢事件，前端加载完主动来拿一次。
 static LAST_PAYLOAD: Mutex<Option<BubblePayload>> = Mutex::new(None);
 static HOOK_STARTED: AtomicBool = AtomicBool::new(false);
+/// 气泡固定宽度（逻辑点）。高度由内容决定，见 bubble.html 的 fitWindow()。
+const BUBBLE_WIDTH: f64 = 380.0;
+/// 气泡最后一次弹出的锚点（逻辑点），窗口改高之后要按它重新夹位置。
+static LAST_ANCHOR: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// 鼠标是否停在气泡上：停着就不自动消失。
+static BUBBLE_HOVER: AtomicBool = AtomicBool::new(false);
+/// 最近一次与气泡的互动时间（悬停/点击）。
+static LAST_TOUCH: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// 等着被「小图标」点开的选区文本（划词后先冒图标，点了才翻译）。
+static PENDING_SELECTION: Mutex<Option<(String, i32, i32)>> = Mutex::new(None);
 
 /// 菜单栏菜单句柄：主界面开关变化时要同步「暂停划词 / 开启划词」文案
 struct MenuState(Menu<tauri::Wry>);
@@ -186,6 +196,7 @@ fn bubble_state() -> Option<BubblePayload> {
 
 /// 单词卡片拿到 AI 精解后把气泡撑高。气泡高度是 Rust 侧按 card 算的，
 /// 页面里只能改内容、改不了窗口大小，所以这里补一个命令。
+/// 页面里的 fitWindow() 会把内容的自然高度报上来，这里只负责夹取与重新贴边。
 #[tauri::command]
 fn resize_bubble(app: AppHandle, height: f64) -> bool {
     let Some(win) = app.get_webview_window("bubble") else {
@@ -194,8 +205,27 @@ fn resize_bubble(app: AppHandle, height: f64) -> bool {
     if !win.is_visible().unwrap_or(false) {
         return false;
     }
-    let h = height.clamp(120.0, 640.0);
-    win.set_size(tauri::LogicalSize::new(380.0, h)).is_ok()
+    let h = height.clamp(120.0, 720.0);
+    let _ = win.set_size(tauri::LogicalSize::new(BUBBLE_WIDTH, h));
+    // 撑高之后可能顶到屏幕底边，按原锚点重新夹一次位置
+    if let Some((x, y)) = LAST_ANCHOR.lock().ok().and_then(|g| *g) {
+        let (px, py) = place_bubble(&app, x, y, BUBBLE_WIDTH, h);
+        let _ = win.set_position(PhysicalPosition::new(px, py));
+    }
+    true
+}
+
+/// 鼠标是否停在气泡上（停着就不自动消失）、以及最近一次互动时间。
+#[tauri::command]
+fn bubble_hover(hovering: bool) {
+    BUBBLE_HOVER.store(hovering, Ordering::Relaxed);
+    touch_bubble();
+}
+
+fn touch_bubble() {
+    if let Ok(mut guard) = LAST_TOUCH.lock() {
+        *guard = Some(Instant::now());
+    }
 }
 
 #[tauri::command]
@@ -417,7 +447,7 @@ fn on_active_space(_win: &tauri::WebviewWindow) -> bool {
 
 fn inside_own_window(app: &AppHandle, lx: i32, ly: i32) -> bool {
     let (px, py) = cursor_physical(app, lx, ly);
-    for label in ["bubble", "main", "permission"] {
+    for label in ["bubble", "sel-icon", "main", "permission"] {
         let Some(win) = app.get_webview_window(label) else { continue };
         if !win.is_visible().unwrap_or(false) {
             continue;
@@ -791,20 +821,9 @@ fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
     show_bubble_in(app, &win, x, y, payload)
 }
 
-fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, payload: BubblePayload) -> u64 {
-    let win = win.clone();
-    float_over_every_space(&win);
-    let width = 380.0;
-    let word = payload.card.as_ref().map(|c| c.mode == "word").unwrap_or(false);
-    let has_ai = payload.card.as_ref().map(|c| c.ai.is_some()).unwrap_or(false);
-    let height = if payload.loading {
-        120.0
-    } else if word {
-        if has_ai { 460.0 } else { 340.0 }
-    } else {
-        200.0
-    };
-
+/// 算出气泡左上角的物理坐标：锚点右下方，再按显示器边界夹一次。
+/// 窗口高度变化（内容自适应 / AI 精解）后也要重算，不然会顶出屏幕。
+fn place_bubble(app: &AppHandle, x: i32, y: i32, width: f64, height: f64) -> (i32, i32) {
     let monitor = pick_monitor(app, x, y);
     let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
     let origin = monitor.as_ref().map(|m| *m.position()).unwrap_or(PhysicalPosition::new(0, 0));
@@ -819,6 +838,29 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
         px = px.min(max_x).max(pos.x + 8);
         py = py.min(max_y).max(pos.y + 8);
     }
+    (px, py)
+}
+
+fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, payload: BubblePayload) -> u64 {
+    let win = win.clone();
+    float_over_every_space(&win);
+    let width = BUBBLE_WIDTH;
+    let word = payload.card.as_ref().map(|c| c.mode == "word").unwrap_or(false);
+    let has_ai = payload.card.as_ref().map(|c| c.ai.is_some()).unwrap_or(false);
+    let height = if payload.loading {
+        120.0
+    } else if word {
+        if has_ai { 460.0 } else { 340.0 }
+    } else {
+        200.0
+    };
+
+    let (px, py) = place_bubble(app, x, y, width, height);
+    if let Ok(mut guard) = LAST_ANCHOR.lock() {
+        *guard = Some((x, y));
+    }
+    BUBBLE_HOVER.store(false, Ordering::Relaxed);
+    touch_bubble();
 
     log::line(format!(
         "bubble at ({px},{py}) requested ({x},{y}) size {width}x{height} loading={} mode={:?}",
@@ -869,6 +911,97 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
     gen
 }
 
+/// 划词后先只在选区旁冒一个 36×36 的小图标，点它（或悬停一下）才真正翻译。
+/// macOS 是 Swift 助手进程画这个图标；其它平台用 icon.html 的小窗口。
+fn hide_icon_now(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("sel-icon") {
+        let _ = win.hide();
+    }
+}
+
+fn show_selection_icon(app: &AppHandle, text: String, x: i32, y: i32) {
+    let Some(win) = app.get_webview_window("sel-icon") else {
+        // 拿不到图标窗口（老配置）时退回直接翻译，别丢功能
+        translate_and_show_with_autohide(app, text, x, y);
+        return;
+    };
+    if let Ok(mut guard) = PENDING_SELECTION.lock() {
+        *guard = Some((text, x, y));
+    }
+    let (px, py) = place_bubble(app, x, y, 36.0, 36.0);
+    float_over_every_space(&win);
+    let _ = win.set_size(tauri::LogicalSize::new(36.0, 36.0));
+    let _ = win.set_position(tauri::PhysicalPosition::new(px, py));
+    let _ = win.show();
+}
+
+fn hide_icon_if_outside(app: &AppHandle, x: f64, y: f64) {
+    if let Some(win) = app.get_webview_window("sel-icon") {
+        if win.is_visible().unwrap_or(false) {
+            if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
+                let (px, py) = cursor_physical(app, x as i32, y as i32);
+                let inside = px >= pos.x
+                    && px <= pos.x + size.width as i32
+                    && py >= pos.y
+                    && py <= pos.y + size.height as i32;
+                if !inside {
+                    let _ = win.hide();
+                }
+            }
+        }
+    }
+}
+
+/// 点开小图标后走完整翻译流程，并挂上「鼠标离开 25 秒后自动收起」的倒计时。
+fn translate_and_show_with_autohide(app: &AppHandle, text: String, x: i32, y: i32) {
+    crate::translate_flow::translate_and_show(app.clone(), text, x as f64, y as f64);
+    let gen = SHOW_GEN.load(Ordering::SeqCst);
+    let app_hide = app.clone();
+    thread::spawn(move || {
+        // 鼠标停在气泡上就不倒计时；离开 25 秒后才自动收起（最长挂 5 分钟兜底）。
+        let started = Instant::now();
+        let mut last_active = started;
+        loop {
+            thread::sleep(Duration::from_millis(400));
+            if BUBBLE_HOVER.load(Ordering::Relaxed) {
+                last_active = Instant::now();
+            } else if let Ok(guard) = LAST_TOUCH.lock() {
+                if let Some(t) = *guard {
+                    if t > last_active {
+                        last_active = t;
+                    }
+                }
+            }
+            if last_active.elapsed() >= Duration::from_secs(25) {
+                break;
+            }
+            if started.elapsed() >= Duration::from_secs(300) {
+                break;
+            }
+        }
+        if SHOW_GEN.load(Ordering::SeqCst) == gen {
+            if let Some(win) = app_hide.get_webview_window("bubble") {
+                let _ = win.hide();
+            }
+        }
+    });
+}
+
+/// 小图标被点开（icon.html 里单击或悬停触发）
+#[tauri::command]
+fn icon_activate(app: AppHandle) {
+    let taken = PENDING_SELECTION.lock().ok().and_then(|mut g| g.take());
+    let Some((text, x, y)) = taken else { return };
+    hide_icon_now(&app);
+    log::line(format!("icon clicked — translating {} chars", text.chars().count()));
+    translate_and_show_with_autohide(&app, text, x, y);
+}
+
+#[tauri::command]
+fn hide_icon(app: AppHandle) {
+    hide_icon_now(&app);
+}
+
 /// 只有拿到权限才真正挂全局钩子；没有权限时挂上也收不到事件，白白吓人。
 fn ensure_hook(app: AppHandle, shared: Arc<Shared>) {
     if !permissions::is_trusted() {
@@ -914,6 +1047,7 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
                     note_cursor(x, y);
                     pressed.set(Some((x, y, Instant::now())));
                     hide_bubble_if_outside(&handler_app, x, y);
+                    hide_icon_if_outside(&handler_app, x, y);
                 }
                 hook::MouseEvent::Dragged(x, y) => note_cursor(x, y),
                 hook::MouseEvent::Up(x, y) => {
@@ -1015,28 +1149,15 @@ fn on_release(
             *last = text.clone();
             *last_at = Instant::now();
         }
-        // macOS：先只在选区旁冒一个小图标；点它 / 悬停才真正翻译（有道的手感）。
+        // 先只在选区旁冒一个小图标；点它 / 悬停才真正翻译（有道的手感）。
+        // macOS 走常驻的 Swift 助手进程，其它平台用 icon.html 那个 36×36 小窗口。
         #[cfg(target_os = "macos")]
         if crate::bubble_helper::show_icon(&text, x, y) {
             log::line(format!("bubble icon shown ({} chars)", text.chars().count()));
             return;
         }
-        // Windows / Linux 没有「先冒小图标、点了再翻译」的中间态，直接走
-        // translate_flow 的完整流程：单词会补词典释义，卡片高度按 word 算，
-        // 气泡里的 ✨精解 / 生词本 也才有 card 数据可用。
-        // （这里原先自己拼 payload、绕过 translate_flow，导致 Windows 上
-        // 单词卡片和 AI 精解永远出不来。）
-        crate::translate_flow::translate_and_show(app.clone(), text, x, y);
-        let gen = SHOW_GEN.load(Ordering::SeqCst);
-        let app_hide = app.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(25));
-            if SHOW_GEN.load(Ordering::SeqCst) == gen {
-                if let Some(win) = app_hide.get_webview_window("bubble") {
-                    let _ = win.hide();
-                }
-            }
-        });
+        log::line(format!("selection icon shown ({} chars)", text.chars().count()));
+        show_selection_icon(&app, text, x.round() as i32, y.round() as i32);
     });
 }
 
@@ -1346,11 +1467,20 @@ fn main() {
             let settings_item = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
             let history_item = MenuItem::with_id(app, "history", "历史记录…", true, None::<&str>)?;
             let clip_item = MenuItem::with_id(app, "clip", "翻译剪贴板", true, None::<&str>)?;
+            #[cfg(target_os = "macos")]
             let perm = MenuItem::with_id(app, "perm", "辅助功能权限…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出随译", true, None::<&str>)?;
+            // Windows / Linux 没有系统权限流程（permissions::open_settings 是空实现），
+            // 菜单里不摆这一项，免得点了没反应。
+            #[cfg(target_os = "macos")]
             let menu = Menu::with_items(
                 app,
                 &[&toggle, &clip_item, &settings_item, &history_item, &perm, &quit],
+            )?;
+            #[cfg(not(target_os = "macos"))]
+            let menu = Menu::with_items(
+                app,
+                &[&toggle, &clip_item, &settings_item, &history_item, &quit],
             )?;
             // 主界面的开关要能同步菜单栏文案，所以把菜单托管起来
             app.manage(MenuState(menu.clone()));
@@ -1571,6 +1701,9 @@ fn main() {
             set_config,
             bubble_state,
             resize_bubble,
+            icon_activate,
+            hide_icon,
+            bubble_hover,
             js_log,
             translate_text,
             lookup_word,

@@ -228,16 +228,40 @@ fn paste_change_count() -> Option<i64> {
     None
 }
 
+/// Windows / Linux 没有 NSPasteboard 的 changeCount，用一个「哨兵」代替：
+/// 复制前先往剪贴板写一个不可能出现在选区里的唯一串，之后只要剪贴板不是它，
+/// 就证明这次 Ctrl+C 真的生效了。顺带修掉「选中的词恰好等于剪贴板旧内容」时
+/// 永远判定失败的老问题（macOS 上是用 changeCount 解决的同一个 bug）。
+#[cfg(target_os = "macos")]
+fn clipboard_sentinel() -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clipboard_sentinel() -> Option<String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some(format!("\u{2}suiyi-{}-{}", std::process::id(), nanos))
+}
+
 fn clipboard_select() -> Option<String> {
     let mut cb = Clipboard::new().ok()?;
     let before = cb.get_text().ok().unwrap_or_default();
     let count_before = paste_change_count();
+    let sentinel = clipboard_sentinel();
 
     // 第一次 ⌘C 可能落在「窗口刚被激活」的瞬间被吞掉，隔 180ms 再补一次
     let mut grabbed: Option<String> = None;
     for attempt in 0..3 {
         if attempt > 0 {
             sleep(Duration::from_millis(200));
+        }
+        if let Some(s) = &sentinel {
+            // 先把剪贴板泡在哨兵里；写失败也没关系，后面的判断会退回「内容变了」那条
+            let _ = cb.set_text(s.as_str());
+            sleep(Duration::from_millis(15));
         }
         if send_copy().is_none() {
             continue;
@@ -254,8 +278,13 @@ fn clipboard_select() -> Option<String> {
                 if t.is_empty() {
                     continue;
                 }
-                // changeCount 变了 → 是这次复制的内容（哪怕和旧内容一样）
-                if fresh || t != before.trim() {
+                let captured = match &sentinel {
+                    // 还是哨兵 → 复制没生效；不是哨兵 → 这次复制拿到了东西
+                    Some(s) => t != s.as_str(),
+                    None => fresh || t != before.trim(),
+                };
+                // changeCount 变了 / 不是哨兵 → 是这次复制的内容（哪怕和旧内容一样）
+                if captured {
                     grabbed = Some(t);
                     break;
                 }
@@ -269,11 +298,10 @@ fn clipboard_select() -> Option<String> {
     if grabbed.is_none() {
         crate::log::line("capture: copy attempts exhausted");
     }
-    if grabbed.is_some() {
-        // give the source app a beat before we overwrite the clipboard again
-        sleep(Duration::from_millis(140));
-        let _ = cb.set_text(before);
-    }
+    // give the source app a beat before we overwrite the clipboard again
+    sleep(Duration::from_millis(140));
+    // 无论成功与否都要把剪贴板还原：失败时里面可能正躺着哨兵
+    let _ = cb.set_text(before);
     grabbed
 }
 

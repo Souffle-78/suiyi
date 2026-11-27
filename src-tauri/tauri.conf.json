@@ -27,6 +27,22 @@
         "center": false
       },
       {
+        "label": "sel-icon",
+        "title": "随译",
+        "url": "icon.html",
+        "width": 36,
+        "height": 36,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "focus": false,
+        "center": false
+      },
+      {
         "label": "main",
         "title": "随译",
         "url": "app.html",

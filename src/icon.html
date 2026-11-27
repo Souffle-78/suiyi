@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>随译</title>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  body { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; }
+  #btn {
+    width: 36px; height: 36px; border-radius: 11px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(28, 28, 30, 0.96);
+    color: #f2f2f7; font-size: 17px; font-weight: 700;
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+    cursor: pointer; user-select: none;
+    transition: transform 0.12s ease, background 0.12s ease;
+  }
+  body:hover #btn { transform: scale(1.06); background: rgba(10, 132, 255, 0.96); }
+</style>
+</head>
+<body>
+  <div id="btn">译</div>
+<script>
+  const api = window.__TAURI__ || null;
+
+  function activate() {
+    if (!api) return;
+    api.core.invoke('icon_activate').catch(() => {});
+  }
+
+  // 单击翻译；悬停 250ms 也翻译（跟 macOS 助手的手感一致）
+  let hoverTimer = 0;
+  document.body.addEventListener('mousedown', (e) => { e.preventDefault(); activate(); });
+  document.body.addEventListener('mouseenter', () => {
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(activate, 250);
+  });
+  document.body.addEventListener('mouseleave', () => clearTimeout(hoverTimer));
+
+  // 长时间没人理就自己收起来，别一直挂着
+  let idle = setTimeout(() => {
+    if (api) api.core.invoke('hide_icon').catch(() => {});
+  }, 12000);
+  document.body.addEventListener('mouseenter', () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => {
+      if (api) api.core.invoke('hide_icon').catch(() => {});
+    }, 12000);
+  });
+</script>
+</body>
+</html>

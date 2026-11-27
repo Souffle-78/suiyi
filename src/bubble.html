@@ -144,6 +144,7 @@
       e.textContent = p.error;
       box.appendChild(e);
     }
+    scheduleFit();
   }
 
   function render(p) {
@@ -169,9 +170,27 @@
     }
     $('tag').textContent = (p.detected || 'auto') + ' → ' + (p.target || '');
     $('out').textContent = p.text || '';
+    scheduleFit();
   }
 
   window.__suiyiRender = (p) => { try { render(p); } catch (e) { log('render threw ' + e); } };
+
+  // 窗口高度由内容决定：先临时解除「撑满窗口」的限制，量出自然高度再报给 Rust。
+  // （.card 平时是 height:calc(100vh-8px)，不解除就永远量到当前窗口高度）
+  let fitTimer = 0;
+  function fitWindow() {
+    const card = $('card');
+    const prev = card.style.height;
+    card.style.height = 'auto';
+    const h = Math.ceil(card.getBoundingClientRect().height) + 8; // 加上下各 4px 外边距
+    card.style.height = prev;
+    if (h > 60) api.core.invoke('resize_bubble', { height: h }).catch(() => {});
+  }
+  function scheduleFit() {
+    clearTimeout(fitTimer);
+    // 等字体/布局稳定再量，避免量到半成品
+    fitTimer = setTimeout(() => { try { fitWindow(); } catch (_) {} }, 30);
+  }
 
   const log = (m) => { try { api && api.core.invoke('js_log', { message: String(m) }); } catch (_) {} };
   log('boot api=' + !!api + ' hasEvent=' + !!(api && api.event) + ' hasCore=' + !!(api && api.core));
@@ -196,10 +215,8 @@
         return;
       }
       $('aiBtn').textContent = '✨ 精解';
-      // 精解会让卡片变高；窗口高度是 Rust 侧定的，得请它重新量一次
-      if (last.card && last.card.mode === 'word') {
-        api.core.invoke('resize_bubble', { height: 460 }).catch(() => {});
-      }
+      // 精解会让卡片变高，重新量一次并请 Rust 调窗口大小
+      scheduleFit();
     };
     $('save').onclick = async () => {
       if (!last || !last.source || !last.text) return;
@@ -231,6 +248,13 @@
     };
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') api.window.getCurrentWindow().hide();
+    });
+    // 鼠标停在气泡上时不自动消失（Rust 侧的 25 秒倒计时会暂停）
+    document.body.addEventListener('mouseenter', () => {
+      try { api.core.invoke('bubble_hover', { hovering: true }); } catch (_) {}
+    });
+    document.body.addEventListener('mouseleave', () => {
+      try { api.core.invoke('bubble_hover', { hovering: false }); } catch (_) {}
     });
   }
 </script>
