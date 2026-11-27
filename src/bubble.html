@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -350,6 +350,16 @@
     });
     document.body.addEventListener('mouseleave', () => {
       try { api.core.invoke('bubble_hover', { hovering: false }); } catch (_) {}
+    });
+
+    // 按住卡片空白处可以拖动气泡（macOS 面板是 isMovableByWindowBackground）。
+    // 点在按钮、可编辑文本、链接上时不拖，避免抢掉点击和选字。
+    document.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const t = e.target;
+      if (!t || t.closest('button, a, input, textarea, [contenteditable]')) return;
+      e.preventDefault();
+      try { api.core.invoke('drag_bubble'); } catch (_) {}
     });
   }
 </script>

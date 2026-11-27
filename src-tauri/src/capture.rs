@@ -170,7 +170,6 @@ mod ax {
     //! 拿不到的情况：控制台（conhost/Windows Terminal 的缓冲区）、部分 Qt/Java 程序，
     //! 以及以管理员权限运行、而本进程不是管理员的窗口（UIPI 限制）。
 
-    use windows::core::Interface;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,

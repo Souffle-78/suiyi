@@ -30,11 +30,13 @@ objc = "0.2"
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 enigo = "0.2"
 # UIA TextPattern 读选区（macOS 用 AX，Windows 等价物是 UI Automation）
+# DWM 用来给气泡上系统原生圆角（NSPanel 的 cornerRadius 等价物）
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
 ] }
 
 [profile.release]

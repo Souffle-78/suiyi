@@ -74,10 +74,10 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 - 气泡的 macOS 部分拆成了两个进程（主程序 + `suiyi-helper`），排查问题时要看两边的日志：
   主程序 `suiyi.log`，助手在同目录（`bubble-helper.pid` 里是它的 pid）。Windows 只有主程序一个进程。
 - macOS 分发需要签名与公证，否则别人首次打开会被 Gatekeeper 拦
-- Windows 版的两个平台限制（系统没有公开 API，做不到）：
-  - 气泡浮在**独占全屏**（DirectX exclusive，部分游戏/播放器）之上做不到；无边框全屏（浏览器 F11）没问题
+- Windows 版的两个平台限制（系统没有公开 API，做不到）：  - 气泡浮在**独占全屏**（DirectX exclusive，部分游戏/播放器）之上做不到；无边框全屏（浏览器 F11）没问题
   - 气泡只在**创建它的虚拟桌面**上可见，不会像 macOS 的 `canJoinAllSpaces` 那样跟随所有桌面
   - 以管理员权限运行的窗口（任务管理器、UAC 提权程序）里划词收不到：Windows 的 UIPI 不允许低权限程序读到高权限窗口的输入与选区
+- Windows 的气泡可以按住卡片空白处拖动；不加 `WS_EX_NOACTIVATE` 是因为「改原文重译」要在气泡里打字，加了就打不了字（macOS 用非激活面板，所以它能两头都要）
 - 本机开发用自签证书固定签名（否则每次重编译「辅助功能 / 输入监控」授权都会失效）：
   ```bash
   security create-keychain -p suiyi-build ~/Library/Keychains/suiyi-signing.keychain-db

@@ -132,6 +132,11 @@ const BUBBLE_WIDTH: f64 = 380.0;
 static LAST_ANCHOR: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 /// 鼠标是否停在气泡上：停着就不自动消失。
 static BUBBLE_HOVER: AtomicBool = AtomicBool::new(false);
+/// 用户手动拖过气泡：之后改高就别再按旧锚点贴边了。
+static BUBBLE_MOVED: AtomicBool = AtomicBool::new(false);
+/// 拖动气泡的宽限期：拖完松手那一下不能当成「拖选文字」去抓选区，
+/// 否则气泡会被当成划词触发点、可能直接消失。
+static DRAG_GRACE: Mutex<Option<Instant>> = Mutex::new(None);
 /// 最近一次与气泡的互动时间（悬停/点击）。
 static LAST_TOUCH: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 /// 等着被「小图标」点开的选区文本（划词后先冒图标，点了才翻译）。
@@ -207,10 +212,13 @@ fn resize_bubble(app: AppHandle, height: f64) -> bool {
     }
     let h = height.clamp(120.0, 720.0);
     let _ = win.set_size(tauri::LogicalSize::new(BUBBLE_WIDTH, h));
-    // 撑高之后可能顶到屏幕底边，按原锚点重新夹一次位置
-    if let Some((x, y)) = LAST_ANCHOR.lock().ok().and_then(|g| *g) {
-        let (px, py) = place_bubble(&app, x, y, BUBBLE_WIDTH, h);
-        let _ = win.set_position(PhysicalPosition::new(px, py));
+    // 撑高之后可能顶到屏幕底边，按原锚点重新夹一次位置；
+    // 但用户手动拖过就别动它，免得气泡跳回原处。
+    if !BUBBLE_MOVED.load(Ordering::Relaxed) {
+        if let Some((x, y)) = LAST_ANCHOR.lock().ok().and_then(|g| *g) {
+            let (px, py) = place_bubble(&app, x, y, BUBBLE_WIDTH, h);
+            let _ = win.set_position(PhysicalPosition::new(px, py));
+        }
     }
     true
 }
@@ -220,6 +228,21 @@ fn resize_bubble(app: AppHandle, height: f64) -> bool {
 fn bubble_hover(hovering: bool) {
     BUBBLE_HOVER.store(hovering, Ordering::Relaxed);
     touch_bubble();
+}
+
+/// 按住气泡空白处可以拖动它（macOS 面板是 isMovableByWindowBackground，Windows 得自己做）。
+/// 拖过之后就别再按原来的锚点重新贴边了，否则撑高时会跳回去。
+#[tauri::command]
+fn drag_bubble(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("bubble") {
+        BUBBLE_MOVED.store(true, Ordering::Relaxed);
+        if let Ok(mut guard) = DRAG_GRACE.lock() {
+            *guard = Some(Instant::now() + Duration::from_millis(3000));
+        }
+        if let Err(e) = win.start_dragging() {
+            log::line(format!("drag bubble failed: {e}"));
+        }
+    }
 }
 
 fn touch_bubble() {
@@ -785,6 +808,44 @@ unsafe fn overlay_panel(win: &tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i
 #[cfg(not(target_os = "macos"))]
 fn float_over_every_space(_win: &tauri::WebviewWindow) {}
 
+/// Windows 版「NSPanel 化」：macOS 靠 styleMask(NonactivatingPanel) + level + cornerRadius
+/// 让气泡不抢焦点、不占任务栏、带原生圆角；Windows 上这里用 Win32 补同样的效果。
+/// passive=true 用于划词小图标（纯装饰，绝不该拿到焦点）；
+/// passive=false 用于气泡本体（按钮、重译输入都要能点能打字，所以保留激活能力）。
+/// 独占全屏、跨虚拟桌面没有公开 API，只能在 README 里写清楚。
+#[cfg(not(target_os = "macos"))]
+fn panelize(win: &tauri::WebviewWindow, passive: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    };
+
+    let Ok(h) = win.hwnd() else {
+        return;
+    };
+    let hwnd = HWND(h.0);
+    unsafe {
+        let mut ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        // 工具窗：不出现在 Alt+Tab / 任务栏（配置里已经 skipTaskbar，双保险）
+        ex |= WS_EX_TOOLWINDOW.0 as isize;
+        if passive {
+            ex |= WS_EX_NOACTIVATE.0 as isize;
+        }
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+        // Win11 的原生圆角/阴影，别再靠 CSS 假装
+        let pref = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const core::ffi::c_void,
+            std::mem::size_of_val(&pref) as u32,
+        );
+    }
+}
+
 fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
     // macOS：气泡完全交给 NSPanel 助手（它才能盖在别的 App 的全屏空间上）。
     // webview 气泡在 macOS 上已经退役——只在助手不可用时兜底，避免出现两个气泡。
@@ -844,6 +905,8 @@ fn place_bubble(app: &AppHandle, x: i32, y: i32, width: f64, height: f64) -> (i3
 fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, payload: BubblePayload) -> u64 {
     let win = win.clone();
     float_over_every_space(&win);
+    #[cfg(not(target_os = "macos"))]
+    panelize(&win, false);
     let width = BUBBLE_WIDTH;
     let word = payload.card.as_ref().map(|c| c.mode == "word").unwrap_or(false);
     let has_ai = payload.card.as_ref().map(|c| c.ai.is_some()).unwrap_or(false);
@@ -860,6 +923,7 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
         *guard = Some((x, y));
     }
     BUBBLE_HOVER.store(false, Ordering::Relaxed);
+    BUBBLE_MOVED.store(false, Ordering::Relaxed);
     touch_bubble();
 
     log::line(format!(
@@ -931,6 +995,8 @@ fn show_selection_icon(app: &AppHandle, text: String, x: i32, y: i32) {
     }
     let (px, py) = place_bubble(app, x, y, 36.0, 36.0);
     float_over_every_space(&win);
+    #[cfg(not(target_os = "macos"))]
+    panelize(&win, true);
     let _ = win.set_size(tauri::LogicalSize::new(36.0, 36.0));
     let _ = win.set_position(tauri::PhysicalPosition::new(px, py));
     let _ = win.show();
@@ -1099,6 +1165,17 @@ fn on_release(
 ) {
     if !shared.enabled.load(Ordering::Relaxed) {
         return;
+    }
+    // 刚拖过气泡：这一下松手是拖窗口，不是划词
+    if let Ok(mut guard) = DRAG_GRACE.lock() {
+        if let Some(until) = *guard {
+            if Instant::now() < until {
+                *guard = None;
+                log::line("release right after bubble drag — skip");
+                return;
+            }
+            *guard = None;
+        }
     }
     let dx = x - sx;
     let dy = y - sy;
@@ -1773,6 +1850,7 @@ fn main() {
             hide_bubble,
             retranslate,
             bubble_hover,
+            drag_bubble,
             js_log,
             translate_text,
             lookup_word,
