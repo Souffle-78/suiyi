@@ -972,9 +972,12 @@ fn main() {
         }
         if mode == "dict" {
             let word = std::env::var("SUIYI_PROBE_WORD").unwrap_or_else(|_| "action".into());
-            match translate::lookup(&word) {
-                Ok(d) => println!("dict {}", serde_json::to_string(&d).unwrap_or_default()),
-                Err(e) => println!("ERR {e}"),
+            match translate::zh_lookup(&word) {
+                Some(z) => println!("zh {}", serde_json::to_string(&z).unwrap_or_default()),
+                None => match translate::lookup(&word) {
+                    Ok(d) => println!("dict {}", serde_json::to_string(&d).unwrap_or_default()),
+                    Err(e) => println!("ERR {e}"),
+                },
             }
             return;
         }

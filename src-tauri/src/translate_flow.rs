@@ -54,24 +54,43 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
         Ok(t) => {
             crate::history::record(&t);
             let (mode, phonetic, phonetics, senses) = if word_mode {
-                match crate::translate::lookup(&source) {
-                    Ok(d) => (
-                        "word".to_string(),
-                        d.phonetic,
-                        d.phonetics
-                            .into_iter()
-                            .map(|p| Phonetic { label: p.label, text: p.text })
-                            .collect(),
-                        d.senses
-                            .into_iter()
-                            .map(|s| Sense {
-                                pos: s.pos,
-                                defs: s.defs,
-                                examples: s.examples,
-                            })
-                            .collect(),
-                    ),
-                    Err(_) => ("sentence".to_string(), String::new(), Vec::new(), Vec::new()),
+                // 先拿中文释义（有道），拿不到再退回英英词典
+                if let Some(z) = crate::translate::zh_lookup(&source) {
+                    let mut ph = Vec::new();
+                    if !z.uk.is_empty() {
+                        ph.push(Phonetic { label: "英".into(), text: format!("/{}/", z.uk) });
+                    }
+                    if !z.us.is_empty() && z.us != z.uk {
+                        ph.push(Phonetic { label: "美".into(), text: format!("/{}/", z.us) });
+                    }
+                    let phonetic = ph.first().map(|p| p.text.clone()).unwrap_or_default();
+                    let senses = z
+                        .senses
+                        .into_iter()
+                        .map(|s| Sense { pos: s.pos, defs: s.defs, examples: s.examples, zh: s.zh })
+                        .collect::<Vec<_>>();
+                    ("word".to_string(), phonetic, ph, senses)
+                } else {
+                    match crate::translate::lookup(&source) {
+                        Ok(d) => (
+                            "word".to_string(),
+                            d.phonetic,
+                            d.phonetics
+                                .into_iter()
+                                .map(|p| Phonetic { label: p.label, text: p.text })
+                                .collect(),
+                            d.senses
+                                .into_iter()
+                                .map(|s| Sense {
+                                    pos: s.pos,
+                                    defs: s.defs,
+                                    examples: s.examples,
+                                    zh: s.zh,
+                                })
+                                .collect(),
+                        ),
+                        Err(_) => ("sentence".to_string(), String::new(), Vec::new(), Vec::new()),
+                    }
                 }
             } else {
                 ("sentence".to_string(), String::new(), Vec::new(), Vec::new())

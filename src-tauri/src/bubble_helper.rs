@@ -18,6 +18,8 @@ pub struct Sense {
     pub defs: Vec<String>,
     #[serde(default)]
     pub examples: Vec<String>,
+    #[serde(default)]
+    pub zh: bool,
 }
 
 #[derive(serde::Serialize, Clone)]

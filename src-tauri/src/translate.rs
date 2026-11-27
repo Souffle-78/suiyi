@@ -321,6 +321,9 @@ pub struct DictSense {
     pub defs: Vec<String>,
     #[serde(default)]
     pub examples: Vec<String>,
+    /// true = 中文释义（每项是一小段中文意思，用「；」分隔）
+    #[serde(default)]
+    pub zh: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -426,7 +429,7 @@ pub fn parse_dictionary(data: &serde_json::Value) -> Option<DictEntry> {
                 }
             }
             if !defs.is_empty() {
-                senses.push(DictSense { pos, defs, examples });
+                senses.push(DictSense { pos, defs, examples, zh: false });
             }
             if senses.len() >= 3 {
                 break;
@@ -437,4 +440,69 @@ pub fn parse_dictionary(data: &serde_json::Value) -> Option<DictEntry> {
         return None;
     }
     Some(DictEntry { word, phonetic, phonetics, senses, example })
+}
+
+
+// ---------------------------------------------------------------------------
+// 中文释义：有道公开接口（免 key）。返回「n. 行动；行为；战斗」这种词组式释义，
+// 比英英词典更适合「扫一眼知道意思」。
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ZhEntry {
+    pub word: String,
+    pub uk: String,
+    pub us: String,
+    pub senses: Vec<DictSense>,
+}
+
+pub fn zh_lookup(word: &str) -> Option<ZhEntry> {
+    let w: String = word.trim().chars().take(48).collect();
+    if w.is_empty() || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '\'' || c == ' ') {
+        return None;
+    }
+    let url = format!("https://dict.youdao.com/jsonapi?q={}", urlencoding::encode(&w));
+    let resp = client(8)
+        .ok()?
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
+        .send()
+        .ok()?;
+    let data: serde_json::Value = resp.json().ok()?;
+    parse_youdao(&data)
+}
+
+pub fn parse_youdao(data: &serde_json::Value) -> Option<ZhEntry> {
+    let ec = data.get("ec")?;
+    let word_obj = match ec.get("word")? {
+        serde_json::Value::Array(arr) => arr.first()?,
+        other => other,
+    };
+    let word = word_obj.get("return-phrase").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let uk = word_obj.get("ukphone").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let us = word_obj.get("usphone").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let mut senses: Vec<DictSense> = Vec::new();
+    for tr in word_obj.get("trs")?.as_array()? {
+        for one in tr.get("tr").and_then(|v| v.as_array()).into_iter().flatten() {
+            let Some(text) = one.get("l").and_then(|l| l.get("i")).and_then(|i| i.as_array())
+                .and_then(|arr| arr.first()).and_then(|v| v.as_str()) else { continue };
+            let text = text.trim();
+            if text.is_empty() { continue; }
+            // 「n. 行动；行为；…」：词性取到第一个空格；【名】这类方括号词性单独成块
+            let (pos, rest) = match text.find(' ') {
+                Some(idx) if idx <= 8 => (text[..idx].to_string(), text[idx..].trim().to_string()),
+                _ => (String::new(), text.to_string()),
+            };
+            let mut items: Vec<String> = rest
+                .split('；')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
+            if items.is_empty() { items.push(rest); }
+            senses.push(DictSense { pos, defs: items, examples: Vec::new(), zh: true });
+        }
+    }
+    if senses.is_empty() { return None; }
+    Some(ZhEntry { word, uk, us, senses })
 }

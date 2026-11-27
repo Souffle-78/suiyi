@@ -38,6 +38,7 @@ struct Sense: Decodable {
     var pos: String
     var defs: [String]
     var examples: [String]?
+    var zh: Bool?
 }
 
 struct PhoneticLite: Decodable {
@@ -61,8 +62,8 @@ struct Request: Decodable {
     var y: Double
 }
 
-let panelWidth: CGFloat = 420
-let pad: CGFloat = 18
+let panelWidth: CGFloat = 384
+let pad: CGFloat = 16
 let ink = NSColor(white: 0.96, alpha: 1)
 
 func writeAction(_ action: String, source: String, text: String, x: Double, y: Double) {
@@ -209,7 +210,7 @@ final class BubbleView: NSView, NSTextViewDelegate {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.11, alpha: 0.97).cgColor
+        layer?.backgroundColor = NSColor(white: 0.11, alpha: 0.99).cgColor
         layer?.cornerRadius = 12
         layer?.borderWidth = 1
         layer?.borderColor = NSColor(white: 1, alpha: 0.12).cgColor
@@ -219,7 +220,7 @@ final class BubbleView: NSView, NSTextViewDelegate {
         header.lineBreakMode = .byTruncatingTail
         addSubview(header)
 
-        headword.font = .systemFont(ofSize: 22, weight: .semibold)
+        headword.font = .systemFont(ofSize: 20, weight: .semibold)
         headword.textColor = .white
         headword.lineBreakMode = .byTruncatingTail
         addSubview(headword)
@@ -452,46 +453,76 @@ final class BubbleView: NSView, NSTextViewDelegate {
     private func wordBody(_ r: Request) -> NSAttributedString {
         let out = NSMutableAttributedString()
         let para = NSMutableParagraphStyle()
-        para.lineSpacing = 5
+        para.lineSpacing = 4
 
         if !r.text.isEmpty {
             let lead = NSMutableParagraphStyle()
-            lead.lineSpacing = 4
-            lead.paragraphSpacing = 12
+            lead.lineSpacing = 3
+            lead.paragraphSpacing = 10
             out.append(NSAttributedString(
                 string: r.text + "\n",
-                attributes: [.font: NSFont.systemFont(ofSize: 16, weight: .semibold),
+                attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .semibold),
                              .foregroundColor: ink,
                              .paragraphStyle: lead]))
         }
 
+        // 中文释义：一行一个词性，「n. 行动；行为；战斗」这种词组式，扫一眼就懂
+        let zhSenses = r.senses.filter { $0.zh == true }
+        if !zhSenses.isEmpty {
+            let shown = expanded ? zhSenses : Array(zhSenses.prefix(3))
+            for s in shown {
+                let head = s.pos.isEmpty ? "" : shortPos(s.pos) + " "
+                let items = expanded ? s.defs : Array(s.defs.prefix(2))
+                var line = head + items.joined(separator: "；")
+                if !expanded && s.defs.count > items.count { line += "…" }
+                let p2 = NSMutableParagraphStyle()
+                p2.lineSpacing = 3
+                p2.paragraphSpacing = 6
+                let str = NSMutableAttributedString(
+                    string: line + "\n",
+                    attributes: [.font: NSFont.systemFont(ofSize: 12.5),
+                                 .foregroundColor: NSColor(white: 0.93, alpha: 1),
+                                 .paragraphStyle: p2])
+                if !s.pos.isEmpty, let r = str.string.range(of: head) {
+                    str.addAttribute(.foregroundColor,
+                                     value: NSColor(white: 0.60, alpha: 1),
+                                     range: NSRange(r, in: str.string))
+                    str.addAttribute(.font,
+                                     value: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
+                                     range: NSRange(r, in: str.string))
+                }
+                out.append(str)
+            }
+            return out
+        }
+
+        // 英英兜底：保持编号 + 例句
         let senses = expanded ? r.senses : Array(r.senses.prefix(2))
         for s in senses {
             let shownDefs = expanded ? s.defs : Array(s.defs.prefix(2))
             let shownEx = expanded ? (s.examples ?? []) : Array((s.examples ?? []).prefix(1))
             let posPara = NSMutableParagraphStyle()
-            posPara.lineSpacing = 3
-            posPara.paragraphSpacingBefore = 8
+            posPara.lineSpacing = 2
+            posPara.paragraphSpacingBefore = 6
             out.append(NSAttributedString(
                 string: shortPos(s.pos) + "\n",
-                attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                attributes: [.font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
                              .foregroundColor: NSColor(white: 0.62, alpha: 1),
                              .paragraphStyle: posPara]))
             for (i, def) in shownDefs.enumerated() {
                 out.append(NSAttributedString(
                     string: "\(i + 1). " + def + "\n",
-                    attributes: [.font: NSFont.systemFont(ofSize: 12.5),
+                    attributes: [.font: NSFont.systemFont(ofSize: 12),
                                  .foregroundColor: NSColor(white: 0.93, alpha: 1),
                                  .paragraphStyle: para]))
             }
             for ex in shownEx {
                 out.append(NSAttributedString(
                     string: "例：" + ex + "\n",
-                    attributes: [.font: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 11.5), toHaveTrait: .italicFontMask),
+                    attributes: [.font: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 11), toHaveTrait: .italicFontMask),
                                  .foregroundColor: NSColor(white: 0.66, alpha: 1),
                                  .paragraphStyle: para]))
             }
-            out.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 6)]))
         }
         return out
     }
@@ -567,7 +598,7 @@ final class BubbleView: NSView, NSTextViewDelegate {
             : (pad + 16 + 8 + sourceH + 10)
         let bottomChrome: CGFloat = isWord ? (pad + 26) : (pad + 26 + pad / 2)
         var height = topChrome + textHeight + bottomChrome
-        height = min(max(height, 160), 600)
+        height = min(max(height, 150), 440)
 
         frame = NSRect(x: 0, y: 0, width: panelWidth, height: height)
 
