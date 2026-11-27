@@ -88,6 +88,7 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
   - 气泡只在**创建它的虚拟桌面**上可见，不会像 macOS 的 `canJoinAllSpaces` 那样跟随所有桌面
   - 以管理员权限运行的窗口（任务管理器、UAC 提权程序）里划词收不到：Windows 的 UIPI 不允许低权限程序读到高权限窗口的输入与选区
 - Windows 的气泡按住卡片空白处可拖动，弹出来不会抢焦点（和 macOS 的 NSPanel 一样）；点原文进编辑态时会临时接过焦点，重译完再还给你原来的窗口
+- 拔显示器 / 改缩放之后，已经显示的气泡会在两秒内自动挪回屏幕内，不会「消失在外接屏」
 - 本机开发用自签证书固定签名（否则每次重编译「辅助功能 / 输入监控」授权都会失效）：
   ```bash
   security create-keychain -p suiyi-build ~/Library/Keychains/suiyi-signing.keychain-db
