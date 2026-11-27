@@ -87,7 +87,7 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 - Windows 版的两个平台限制（系统没有公开 API，做不到）：  - 气泡浮在**独占全屏**（DirectX exclusive，部分游戏/播放器）之上做不到；无边框全屏（浏览器 F11）没问题
   - 气泡只在**创建它的虚拟桌面**上可见，不会像 macOS 的 `canJoinAllSpaces` 那样跟随所有桌面
   - 以管理员权限运行的窗口（任务管理器、UAC 提权程序）里划词收不到：Windows 的 UIPI 不允许低权限程序读到高权限窗口的输入与选区
-- Windows 的气泡可以按住卡片空白处拖动；不加 `WS_EX_NOACTIVATE` 是因为「改原文重译」要在气泡里打字，加了就打不了字（macOS 用非激活面板，所以它能两头都要）
+- Windows 的气泡按住卡片空白处可拖动，弹出来不会抢焦点（和 macOS 的 NSPanel 一样）；点原文进编辑态时会临时接过焦点，重译完再还给你原来的窗口
 - 本机开发用自签证书固定签名（否则每次重编译「辅助功能 / 输入监控」授权都会失效）：
   ```bash
   security create-keychain -p suiyi-build ~/Library/Keychains/suiyi-signing.keychain-db
