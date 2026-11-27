@@ -1684,7 +1684,7 @@ fn main() {
             }
             let tray_icon = tray
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                .show_menu_on_left_click(cfg!(target_os = "macos"))
                 .on_menu_event(move |_app, event| match event.id.as_ref() {
                     "quit" => std::process::exit(0),
                     "perm" => permissions::open_settings(),
@@ -1722,6 +1722,14 @@ fn main() {
                             if win.is_visible().unwrap_or(false) {
                                 let _ = win.hide();
                             }
+                        }
+                        // Windows 没有 macOS 那种「点 Dock 图标把窗口叫回来」的入口（RunEvent::Reopen），
+                        // 而这边左键不弹菜单（见 show_menu_on_left_click），所以左键就用来开主窗口，
+                        // 和 Windows 上绝大多数托盘程序一致；菜单在右键。
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            log::line("tray click — opening main window");
+                            open_from_user(&tray_handle);
                         }
                     }
                 })
