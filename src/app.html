@@ -730,7 +730,7 @@ $('openInput').addEventListener('click', () => invoke('open_input_settings'));
 // ---------- 启动 ----------
 (async () => {
   await loadSettings();
-  $('ver').textContent = '0.7.1';
+  $('ver').textContent = '0.8.0';
   updateCount();
   const tab = new URLSearchParams(location.search).get('tab');
   switchTab(tab || 'translate');
