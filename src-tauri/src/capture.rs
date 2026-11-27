@@ -200,7 +200,10 @@ fn send_copy() -> Option<()> {
     let mut enigo = Enigo::new(&Settings::default()).ok()?;
     enigo.key(Key::Control, Direction::Press).ok()?;
     sleep(Duration::from_millis(18));
-    enigo.key(Key::Unicode('c'), Direction::Click).ok()?;
+    // 必须用真正的虚拟键码 VK_C（0x43）。以前用 Key::Unicode('c')，它在 Windows 上
+    // 发的是 KEYEVENTF_UNICODE + 虚拟键 0，记事本、部分 Electron/Qt 程序不把它当
+    // 快捷键处理，于是「Ctrl+C 没生效」——这就是划词偶发抓不到选区的原因。
+    enigo.key(Key::Other(0x43), Direction::Click).ok()?;
     sleep(Duration::from_millis(12));
     let _ = enigo.key(Key::Control, Direction::Release);
     Some(())

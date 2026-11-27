@@ -39,7 +39,8 @@
     flex: 1; overflow-y: auto; padding-right: 2px;
   }
   .err { color: #dc2626; font-size: 13px; }
-  .foot { display:flex; gap: 8px; margin-top: 2px; flex: none; }
+  .foot { display:flex; gap: 4px; margin-top: 2px; flex: none; }
+  .foot button { font-size: 11.5px; padding: 3px 7px; white-space: nowrap; flex: none; }
   button {
     font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 7px;
     border: 1px solid rgba(0,0,0,0.10); background: rgba(0,0,0,0.03);
@@ -64,6 +65,10 @@
   .sense { font-size: 12.5px; line-height: 1.55; margin: 3px 0; }
   .sense .pos { color: #6b7280; font-weight: 500; margin-right: 4px; }
   body.dark .sense .pos { color: #9ca3af; }
+  .sense .eg { color: #6b7280; font-style: italic; font-size: 12px; margin-top: 1px; }
+  body.dark .sense .eg { color: #9ca3af; }
+  .more { margin-top: 2px; font-size: 11px; padding: 2px 6px; }
+  .hw[contenteditable], .src[contenteditable] { outline: none; border-bottom: 1px dashed rgba(128,128,128,0.5); }
   .ai { margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(0,0,0,0.08); }
   body.dark .ai { border-color: rgba(255,255,255,0.10); }
   .ai h4 { margin: 0 0 2px; font-size: 11px; color: #0d9488; font-weight: 600; }
@@ -89,10 +94,14 @@
       <div class="tags" id="tags"></div>
       <div class="main" id="main"></div>
       <div id="senses"></div>
+      <button class="more" id="more" style="display:none">展开更多释义</button>
       <div class="ai" id="ai" style="display:none"><h4>AI 精解</h4><p id="aibody"></p></div>
     </div>
     <div class="foot">
       <button id="aiBtn" title="用 DeepSeek 精解这个词">✨ 精解</button>
+      <button id="speak" title="朗读这个词">朗读</button>
+      <button id="find" title="在主窗口里查这个词">查词</button>
+      <button id="retrans" title="改完原文后回车重译" style="display:none">重译</button>
       <button id="save">存生词</button>
       <button id="copy">复制</button>
       <span class="grow"></span>
@@ -106,9 +115,12 @@
   if (dark) document.body.classList.add('dark');
 
   let last = null;
+  // 「展开更多释义」的状态：默认最多显示 3 个义项、每项 2 条例句，跟 macOS 卡片一致
+  let moreOpen = false;
 
   function renderCard(p) {
     const c = p.card || {};
+    const more = $('more');
     const card = $('card');
     card.classList.add('is-word');
     $('hw').textContent = p.source || '';
@@ -124,8 +136,14 @@
     $('main').textContent = p.loading ? '翻译中…' : (p.text || '');
     const box = $('senses');
     box.innerHTML = '';
+    let shown = 0;
     for (const s of (c.senses || [])) {
       if (!s.defs || !s.defs.length) continue;
+      if (!moreOpen && shown >= 3) {
+        more.style.display = '';
+        break;
+      }
+      shown++;
       const d = document.createElement('div');
       d.className = 'sense';
       const pos = document.createElement('span');
@@ -133,8 +151,20 @@
       pos.textContent = s.pos || '';
       d.appendChild(pos);
       d.appendChild(document.createTextNode(s.defs.join('；')));
+      // 例句：macOS 卡片一直有，webview 气泡以前完全没渲染
+      for (const ex of (s.examples || []).slice(0, moreOpen ? 4 : 2)) {
+        if (!ex) continue;
+        const e = document.createElement('div');
+        e.className = 'eg';
+        e.textContent = ex;
+        d.appendChild(e);
+      }
       box.appendChild(d);
     }
+    if (shown < (c.senses || []).length) more.style.display = '';
+    else more.style.display = 'none';
+    $('speak').style.display = c.mode === 'word' ? '' : 'none';
+    $('find').style.display = c.mode === 'word' ? '' : 'none';
     if (c.ai) { $('ai').style.display = 'block'; $('aibody').textContent = c.ai; }
     else { $('ai').style.display = 'none'; }
     $('aiBtn').style.display = c.mode === 'word' ? '' : 'none';
@@ -153,6 +183,11 @@
     const isWord = p && p.card && p.card.mode === 'word' && (p.loading || (p.card.senses && p.card.senses.length));
     if (isWord) { renderCard(p); return; }
     $('card').classList.remove('is-word');
+    // 句子卡片上没有朗读/查词/更多释义，收起来（窗口是复用的，别留下上一张卡片的按钮）
+    $('speak').style.display = 'none';
+    $('find').style.display = 'none';
+    $('more').style.display = 'none';
+    $('retrans').style.display = 'none';
     $('src').textContent = (p.source || '').replace(/\s+/g, ' ').slice(0, 90);
     if (p.loading) {
       $('tag').textContent = '翻译中';
@@ -200,7 +235,7 @@
     api.event.listen('suiyi://payload', (e) => { log('event'); render(e.payload); });
     // 窗口刚创建时 emit 可能早于本脚本执行，加载完主动拉一次最新内容
     api.core.invoke('bubble_state').then((p) => { log('state pull ' + !!p); if (p) render(p); }).catch((e) => log('state pull failed ' + e));
-    $('close').onclick = () => api.window.getCurrentWindow().hide();
+    $('close').onclick = () => { try { api.core.invoke('hide_bubble'); } catch (_) {} try { api.window.getCurrentWindow().hide(); } catch (_) {} };
     $('aiBtn').onclick = async () => {
       if (!last || !last.source) return;
       $('aiBtn').textContent = '✨ 精解中…';
@@ -247,8 +282,59 @@
       setTimeout(() => { $('copy').textContent = '复制'; }, 1200);
     };
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') api.window.getCurrentWindow().hide();
+      if (e.key === 'Escape') { try { api.core.invoke('hide_bubble'); } catch (_) {} try { api.window.getCurrentWindow().hide(); } catch (_) {} }
     });
+
+    // ---- 朗读：走 WebView2 内置的 speechSynthesis，不依赖任何原生库 ----
+    $('speak').onclick = () => {
+      const word = (last && last.source) || $('hw').innerText || '';
+      if (!word || !window.speechSynthesis) return;
+      try {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(word);
+        u.lang = /[一-龥]/.test(word) ? 'zh-CN' : 'en-US';
+        u.rate = 0.95;
+        window.speechSynthesis.speak(u);
+        $('speak').textContent = '…';
+        setTimeout(() => { $('speak').textContent = '朗读'; }, 1200);
+      } catch (_) {}
+    };
+
+    // ---- 查词：把词丢进主窗口的翻译框 ----
+    $('find').onclick = () => {
+      const word = (last && last.source) || $('hw').innerText || '';
+      if (!word) return;
+      api.core.invoke('open_word_in_main', { word }).catch(() => {});
+      try { api.core.invoke('hide_bubble'); } catch (_) {}
+    };
+
+    // ---- 改原文重译：点原文就能改，回车或点「重译」重新翻一遍 ----
+    const editable = [['src', () => $('src').innerText], ['hw', () => $('hw').innerText]];
+    function doRetranslate() {
+      const text = ($('src').innerText || $('hw').innerText || '').trim();
+      if (!text) return;
+      $('retrans').style.display = 'none';
+      $('retrans').textContent = '重译中…';
+      api.core.invoke('retranslate', { text }).catch(() => {});
+      setTimeout(() => { $('retrans').textContent = '重译'; }, 2000);
+    }
+    for (const [id] of editable) {
+      const el = $(id);
+      el.setAttribute('contenteditable', 'plaintext-only');
+      el.spellcheck = false;
+      el.addEventListener('mousedown', () => { try { api.core.invoke('bubble_focus'); } catch (_) {} });
+      el.addEventListener('input', () => { $('retrans').style.display = ''; });
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); el.blur(); doRetranslate(); }
+      });
+    }
+    $('retrans').onclick = doRetranslate;
+
+    $('more').onclick = () => {
+      moreOpen = !moreOpen;
+      $('more').textContent = moreOpen ? '收起释义' : '展开更多释义';
+      if (last) render(last);
+    };
     // 鼠标停在气泡上时不自动消失（Rust 侧的 25 秒倒计时会暂停）
     document.body.addEventListener('mouseenter', () => {
       try { api.core.invoke('bubble_hover', { hovering: true }); } catch (_) {}

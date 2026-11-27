@@ -908,6 +908,7 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
     // show() 之后 tao 可能又把层级/行为改回去，这里再确认一次（主线程、只置前不抢焦点）
     float_over_every_space(&win);
     let gen = SHOW_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    schedule_bubble_autohide(app, gen);
     gen
 }
 
@@ -952,13 +953,16 @@ fn hide_icon_if_outside(app: &AppHandle, x: f64, y: f64) {
     }
 }
 
-/// 点开小图标后走完整翻译流程，并挂上「鼠标离开 25 秒后自动收起」的倒计时。
+/// 点开小图标后走完整翻译流程（气泡的自动收起在 show_bubble_in 里统一挂）。
 fn translate_and_show_with_autohide(app: &AppHandle, text: String, x: i32, y: i32) {
     crate::translate_flow::translate_and_show(app.clone(), text, x as f64, y as f64);
-    let gen = SHOW_GEN.load(Ordering::SeqCst);
+}
+
+/// 每个气泡都挂一份自动收起：鼠标停在上面就暂停，离开 25 秒后隐藏；
+/// 5 分钟硬兜底，避免某些点击路径把倒计时重置成永不结束。
+fn schedule_bubble_autohide(app: &AppHandle, gen: u64) {
     let app_hide = app.clone();
     thread::spawn(move || {
-        // 鼠标停在气泡上就不倒计时；离开 25 秒后才自动收起（最长挂 5 分钟兜底）。
         let started = Instant::now();
         let mut last_active = started;
         loop {
@@ -1189,6 +1193,50 @@ pub fn open_main_with_word(app: &AppHandle, word: &str) {
 }
 
 #[tauri::command]
+fn open_word_in_main(app: AppHandle, word: String) {
+    open_main_with_word(&app, &word);
+    // 查完词就把气泡收起来，别挡在主窗口前面（macOS 的助手面板也是这么做的）
+    if let Some(win) = app.get_webview_window("bubble") {
+        let _ = win.hide();
+    }
+}
+
+/// 气泡窗口是 focus:false 的（不抢焦点，划词时才不会把你正在用的应用弄丢焦点）。
+/// 但「改原文重译」要打字，所以点原文时临时把焦点交给气泡。
+#[tauri::command]
+fn bubble_focus(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("bubble") {
+        if win.is_visible().unwrap_or(false) {
+            let _ = win.set_focus();
+        }
+    }
+}
+
+#[tauri::command]
+fn hide_bubble(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("bubble") {
+        let _ = win.hide();
+    }
+}
+
+/// 气泡里改完原文点「重译」：还在原来的锚点位置重新走一遍完整流程
+/// （单词会重建词典卡片，句子直接重译）。
+#[tauri::command]
+fn retranslate(app: AppHandle, text: String) {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    let (x, y) = LAST_ANCHOR
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or_else(last_cursor);
+    log::line(format!("retranslate {} chars at ({x},{y})", text.chars().count()));
+    crate::translate_flow::translate_and_show(app, text, x as f64, y as f64);
+}
+
+#[tauri::command]
 fn open_permission_settings() {
     permissions::open_settings();
 }
@@ -1208,6 +1256,9 @@ fn permission_state() -> serde_json::Value {
     serde_json::json!({
         "accessibility": permissions::is_trusted(),
         "inputMonitoring": permissions::input_monitoring(),
+        // Windows/Linux 没有系统权限流程：设置页据此隐藏「辅助功能/输入监控」入口
+        "needsPermission": cfg!(target_os = "macos"),
+        "platform": std::env::consts::OS,
     })
 }
 
@@ -1619,10 +1670,16 @@ fn main() {
                     show_permission_window(&app_perm);
                 });
             } else if !launched_by_autostart {
-                // 手动启动时不再自动弹主窗口：1020×720 的窗口正好压在屏幕中间，
-                // 用户想在别的应用里划词时，选中的区域往往被它挡住，表现成「划词没反应」。
-                // Dock 图标常驻，点一下（Reopen）就能打开主窗口；菜单栏里也有入口。
+                // macOS 有 Dock 图标常驻，点一下（Reopen）就能回主窗口，所以启动时
+                // 可以不弹窗；Windows 没有 Dock，手动双击图标却什么都不出现，用户
+                // 会以为没启动成功。这里直接把主窗口推出来（自启动时仍然静默）。
+                #[cfg(target_os = "macos")]
                 log::line("launched — main window kept closed (Dock icon / menu opens it)");
+                #[cfg(not(target_os = "macos"))]
+                {
+                    log::line("launched — opening main window");
+                    open_app(&handle, "translate");
+                }
             }
 
             let app_hello = handle.clone();
@@ -1703,6 +1760,10 @@ fn main() {
             resize_bubble,
             icon_activate,
             hide_icon,
+            open_word_in_main,
+            bubble_focus,
+            hide_bubble,
+            retranslate,
             bubble_hover,
             js_log,
             translate_text,

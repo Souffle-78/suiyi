@@ -282,7 +282,7 @@
           <input type="checkbox" id="sSelection" />
           <label for="sSelection">在任意应用里选中文字，松开鼠标就弹出译文</label>
         </div>
-        <p class="hint">关掉后不再自动弹气泡，其他功能（主界面翻译、查词、菜单栏「翻译剪贴板」）照常可用。菜单栏那一项会跟着变。</p>
+        <p class="hint">关掉后不再自动弹气泡，其他功能（主界面翻译、查词、「翻译剪贴板」）照常可用。托盘里那一项会跟着变。</p>
       </div>
 
       <div class="setting">
@@ -317,9 +317,9 @@
         <h3>系统</h3>
         <div class="row" style="margin-bottom:10px">
           <input type="checkbox" id="sAutostart" />
-          <label for="sAutostart">登录时自动启动（常驻菜单栏）</label>
+          <label for="sAutostart" id="sAutostartLabel">登录时自动启动（常驻菜单栏）</label>
         </div>
-        <div class="row" style="gap:8px">
+        <div class="row" style="gap:8px" id="permRow">
           <span class="hint" id="permHint"></span>
           <span class="grow"></span>
           <button class="btn" id="openAx">打开「辅助功能」</button>
@@ -658,9 +658,18 @@ async function loadSettings() {
   $('sSelection').checked = !!sel;
   paintSelection(!!sel);
   const perm = await invoke('permission_state').catch(() => null);
-  $('permHint').textContent = perm
-    ? `辅助功能：${perm.accessibility ? '已授权' : '未授权'} · 输入监控：${perm.inputMonitoring === null ? '不适用' : (perm.inputMonitoring ? '已授权' : '未授权')}`
-    : '';
+  // Windows/Linux 没有「辅助功能 / 输入监控」这套系统权限，整行藏掉，
+  // 免得用户去点一个点了没反应的按钮。
+  const needsPerm = !perm || perm.needsPermission !== false;
+  if (!needsPerm) {
+    const row = $('permRow');
+    if (row) row.style.display = 'none';
+    $('sAutostartLabel').textContent = '登录时自动启动（常驻托盘）';
+  } else {
+    $('permHint').textContent = perm
+      ? `辅助功能：${perm.accessibility ? '已授权' : '未授权'} · 输入监控：${perm.inputMonitoring === null ? '不适用' : (perm.inputMonitoring ? '已授权' : '未授权')}`
+      : '';
+  }
 }
 document.querySelectorAll('.radio').forEach((r) => r.addEventListener('click', () => {
   document.querySelectorAll('.radio').forEach((x) => x.classList.remove('on'));
