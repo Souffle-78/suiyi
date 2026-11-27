@@ -88,7 +88,7 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
   ```
   之后用 `npm run build`（会先解锁钥匙串再打包，避免 codesign 卡在系统密码弹窗）。
 
-## 三端支持
+## 双端支持
 
 | 平台 | 抓选区方式 | 状态 |
 | --- | --- | --- |
