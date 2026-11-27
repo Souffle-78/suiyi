@@ -207,25 +207,68 @@ fn send_copy() -> Option<()> {
 }
 
 /// 通过模拟复制读选区：兜底路径，能应对 AX 拿不到选区的应用（浏览器、PDF 阅读器常见）。
+/// macOS：用 NSPasteboard 的 changeCount 判断「这次复制到底成功没有」。
+/// 之前用「内容和旧剪贴板不同」来判断，选中的词恰好等于剪贴板内容时就永远失败。
+#[cfg(target_os = "macos")]
+fn paste_change_count() -> Option<i64> {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let pb: *mut Object = msg_send![class!(NSPasteboard), generalPasteboard];
+        if pb.is_null() {
+            return None;
+        }
+        let count: i64 = msg_send![pb, changeCount];
+        Some(count)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn paste_change_count() -> Option<i64> {
+    None
+}
+
 fn clipboard_select() -> Option<String> {
     let mut cb = Clipboard::new().ok()?;
     let before = cb.get_text().ok().unwrap_or_default();
+    let count_before = paste_change_count();
 
-    send_copy()?;
-
-    let deadline = Instant::now() + Duration::from_millis(420);
+    // 第一次 ⌘C 可能落在「窗口刚被激活」的瞬间被吞掉，隔 180ms 再补一次
     let mut grabbed: Option<String> = None;
-    while Instant::now() < deadline {
-        sleep(Duration::from_millis(22));
-        if let Ok(t) = cb.get_text() {
-            let t = t.trim().to_string();
-            if !t.is_empty() && t != before.trim() {
-                grabbed = Some(t);
-                break;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            sleep(Duration::from_millis(200));
+        }
+        if send_copy().is_none() {
+            continue;
+        }
+        let deadline = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < deadline {
+            sleep(Duration::from_millis(20));
+            let fresh = match (paste_change_count(), count_before) {
+                (Some(after), Some(before_n)) => after != before_n,
+                _ => false,
+            };
+            if let Ok(t) = cb.get_text() {
+                let t = t.trim().to_string();
+                if t.is_empty() {
+                    continue;
+                }
+                // changeCount 变了 → 是这次复制的内容（哪怕和旧内容一样）
+                if fresh || t != before.trim() {
+                    grabbed = Some(t);
+                    break;
+                }
             }
+        }
+        if grabbed.is_some() {
+            break;
         }
     }
 
+    if grabbed.is_none() {
+        crate::log::line("capture: copy attempts exhausted");
+    }
     if grabbed.is_some() {
         // give the source app a beat before we overwrite the clipboard again
         sleep(Duration::from_millis(140));
@@ -234,14 +277,31 @@ fn clipboard_select() -> Option<String> {
     grabbed
 }
 
+#[cfg(target_os = "macos")]
+fn ax_text() -> Option<String> {
+    ax::selected_text()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ax_text() -> Option<String> {
+    None
+}
+
 /// Grab the current selection.
 /// 先用模拟复制（快、跨应用最稳），拿不到再用辅助功能接口兜底（覆盖禁用复制的应用）。
 pub fn select_text() -> Option<String> {
-    if let Some(t) = clipboard_select() {
+    let via_copy = clipboard_select();
+    if let Some(t) = via_copy {
         let t = t.trim().to_string();
         if !t.is_empty() {
             return Some(t);
         }
     }
-    ax::selected_text().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+    match ax_text() {
+        Some(t) if !t.trim().is_empty() => Some(t.trim().to_string()),
+        _ => {
+            crate::log::line("capture failed — copy:none ax:none");
+            None
+        }
+    }
 }

@@ -34,6 +34,7 @@
   .src { font-size: 12px; color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   body.dark .src { color: #9ca3af; }
   .out {
+    min-height: 0;
     font-size: 15px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
     flex: 1; overflow-y: auto; padding-right: 2px;
   }
@@ -48,6 +49,25 @@
   body.dark button { border-color: rgba(255,255,255,0.14); background: rgba(255,255,255,0.06); }
   body.dark button:hover { background: rgba(255,255,255,0.12); }
   .grow { flex: 1; }
+  /* 单词卡片（Windows / Linux 用；macOS 走 NSPanel 助手） */
+  .word { display: none; flex: 1; min-height: 0; flex-direction: column; gap: 2px; overflow-y: auto; padding-right: 2px; }
+  .card.is-word .row { display: none; }
+  .card.is-word .out { display: none; }
+  .card.is-word .word { display: flex; }
+  .hw { font-size: 19px; font-weight: 600; line-height: 1.25; margin-bottom: 2px; }
+  .ph { font-size: 12px; color: #6b7280; margin-bottom: 2px; }
+  body.dark .ph { color: #9ca3af; }
+  .ph b { font-weight: 500; color: #9ca3af; margin-right: 3px; }
+  body.dark .ph b { color: #8b8f98; }
+  .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px; }
+  .main { font-size: 14px; font-weight: 600; margin: 6px 0 4px; }
+  .sense { font-size: 12.5px; line-height: 1.55; margin: 3px 0; }
+  .sense .pos { color: #6b7280; font-weight: 500; margin-right: 4px; }
+  body.dark .sense .pos { color: #9ca3af; }
+  .ai { margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(0,0,0,0.08); }
+  body.dark .ai { border-color: rgba(255,255,255,0.10); }
+  .ai h4 { margin: 0 0 2px; font-size: 11px; color: #0d9488; font-weight: 600; }
+  .ai p { margin: 0; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; }
   .spinner {
     width: 14px; height: 14px; border-radius: 50%;
     border: 2px solid rgba(59,130,246,0.25); border-top-color: #3b82f6;
@@ -63,7 +83,16 @@
       <span class="src" id="src"></span>
     </div>
     <div class="out" id="out"><span class="spinner"></span></div>
+    <div class="word" id="word">
+      <div class="hw" id="hw"></div>
+      <div class="ph" id="ph"></div>
+      <div class="tags" id="tags"></div>
+      <div class="main" id="main"></div>
+      <div id="senses"></div>
+      <div class="ai" id="ai" style="display:none"><h4>AI 精解</h4><p id="aibody"></p></div>
+    </div>
     <div class="foot">
+      <button id="aiBtn" title="用 DeepSeek 精解这个词">✨ 精解</button>
       <button id="save">存生词</button>
       <button id="copy">复制</button>
       <span class="grow"></span>
@@ -78,9 +107,51 @@
 
   let last = null;
 
+  function renderCard(p) {
+    const c = p.card || {};
+    const card = $('card');
+    card.classList.add('is-word');
+    $('hw').textContent = p.source || '';
+    const ph = (c.phonetics || []).map((x) => (x.label ? x.label + ' ' : '') + x.text).join('   ');
+    $('ph').textContent = ph || c.phonetic || '';
+    $('tags').innerHTML = '';
+    for (const t of (c.tags || [])) {
+      const s = document.createElement('span');
+      s.className = 'tag';
+      s.textContent = t;
+      $('tags').appendChild(s);
+    }
+    $('main').textContent = p.loading ? '翻译中…' : (p.text || '');
+    const box = $('senses');
+    box.innerHTML = '';
+    for (const s of (c.senses || [])) {
+      if (!s.defs || !s.defs.length) continue;
+      const d = document.createElement('div');
+      d.className = 'sense';
+      const pos = document.createElement('span');
+      pos.className = 'pos';
+      pos.textContent = s.pos || '';
+      d.appendChild(pos);
+      d.appendChild(document.createTextNode(s.defs.join('；')));
+      box.appendChild(d);
+    }
+    if (c.ai) { $('ai').style.display = 'block'; $('aibody').textContent = c.ai; }
+    else { $('ai').style.display = 'none'; }
+    $('aiBtn').style.display = c.mode === 'word' ? '' : 'none';
+    if (p.error) {
+      const e = document.createElement('div');
+      e.className = 'err';
+      e.textContent = p.error;
+      box.appendChild(e);
+    }
+  }
+
   function render(p) {
     log('render loading=' + (p && p.loading) + ' err=' + (p && p.error) + ' len=' + ((p && p.text) || '').length);
     last = p;
+    const isWord = p && p.card && p.card.mode === 'word' && (p.loading || (p.card.senses && p.card.senses.length));
+    if (isWord) { renderCard(p); return; }
+    $('card').classList.remove('is-word');
     $('src').textContent = (p.source || '').replace(/\s+/g, ' ').slice(0, 90);
     if (p.loading) {
       $('tag').textContent = '翻译中';
@@ -111,6 +182,21 @@
     // 窗口刚创建时 emit 可能早于本脚本执行，加载完主动拉一次最新内容
     api.core.invoke('bubble_state').then((p) => { log('state pull ' + !!p); if (p) render(p); }).catch((e) => log('state pull failed ' + e));
     $('close').onclick = () => api.window.getCurrentWindow().hide();
+    $('aiBtn').onclick = async () => {
+      if (!last || !last.source) return;
+      $('aiBtn').textContent = '✨ 精解中…';
+      try {
+        const ai = await api.core.invoke('ai_explain', { word: last.source });
+        last.card = last.card || {};
+        last.card.ai = ai;
+        render(last);
+      } catch (err) {
+        $('aiBtn').textContent = '✨ 失败';
+        setTimeout(() => { $('aiBtn').textContent = '✨ 精解'; }, 1600);
+        return;
+      }
+      $('aiBtn').textContent = '✨ 精解';
+    };
     $('save').onclick = async () => {
       if (!last || !last.source || !last.text) return;
       try {

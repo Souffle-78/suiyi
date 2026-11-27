@@ -1,12 +1,14 @@
-//! 划词翻译主流程（macOS 助手气泡 + 各平台共用）。
+//! 划词翻译主流程（macOS 用 NSPanel 助手，Windows/Linux 用 webview 气泡）。
 //!
-//! 流程：拿到选区文本 → 先让助手把「翻译中」面板画出来 → 后台翻译 →
-//! 单词再补一份词典释义 → 把结果推回助手。
-//! 非 macOS（Windows/Linux）走原来的 webview 气泡，逻辑在同名函数里分支。
+//! 流程：拿到选区文本 → 先画「翻译中」→ 后台翻译 → 单词再补词典释义 → 画结果。
+//! 两个平台共用同一份 CardPayload，只是渲染端不同。
 
 use crate::bubble_helper::{Phonetic, Sense};
+use crate::{
+    present_card, CardPayload, CardSense, PhonLabel,
+};
 use std::thread;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// 只由「一个英文单词」组成的文本才走词典（短语/句子只翻译）。
 pub fn is_single_word(text: &str) -> bool {
@@ -27,6 +29,65 @@ fn panel_title(detected: &str, target: &str, provider: &str) -> String {
     }
 }
 
+/// 一条「要怎么显示」的完整描述，macOS / Windows 共用。
+pub struct Card {
+    pub title: String,
+    pub source: String,
+    pub text: String,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub payload: CardPayload,
+    pub lx: f64,
+    pub ly: f64,
+}
+
+fn present(app: &AppHandle, card: Card) {
+    #[cfg(target_os = "macos")]
+    {
+        let phonetics = card
+            .payload
+            .phonetics
+            .iter()
+            .map(|p| Phonetic { label: p.label.clone(), text: p.text.clone() })
+            .collect::<Vec<_>>();
+        let senses = card
+            .payload
+            .senses
+            .iter()
+            .map(|s| Sense {
+                pos: s.pos.clone(),
+                defs: s.defs.clone(),
+                examples: s.examples.clone(),
+                zh: s.zh,
+            })
+            .collect::<Vec<_>>();
+        let shown = crate::bubble_helper::show_panel(
+            card.title.clone(),
+            card.source.clone(),
+            card.text.clone(),
+            card.loading,
+            card.error.clone(),
+            card.payload.mode.clone(),
+            card.payload.phonetic.clone(),
+            phonetics,
+            card.payload.tags.clone(),
+            card.payload.ai.clone(),
+            senses,
+            card.lx,
+            card.ly,
+        );
+        if shown {
+            return;
+        }
+    }
+    // 非 macOS，或 macOS 助手起不来：退回 webview 气泡
+    present_card(app, card);
+}
+
+fn blank(mode: &str) -> CardPayload {
+    CardPayload { mode: mode.to_string(), ..Default::default() }
+}
+
 /// 翻译并展示：先画 loading，再画结果（单词附词典）。
 pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
     let source = text.trim().to_string();
@@ -35,121 +96,104 @@ pub fn translate_and_show(app: AppHandle, text: String, lx: f64, ly: f64) {
     }
     let word_mode = is_single_word(&source);
 
-    let _ = crate::bubble_helper::show_panel(
-        "翻译中".into(),
-        source.clone(),
-        String::new(),
-        true,
-        None,
-        if word_mode { "word".into() } else { "sentence".into() },
-        String::new(),
-        Vec::new(),
-        Vec::new(),
-        None,
-        Vec::new(),
-        lx,
-        ly,
+    present(
+        &app,
+        Card {
+            title: "翻译中".into(),
+            source: source.clone(),
+            text: String::new(),
+            loading: true,
+            error: None,
+            payload: blank(if word_mode { "word" } else { "sentence" }),
+            lx,
+            ly,
+        },
     );
 
     let cfg = crate::config::load();
     match crate::translate::run(&source, &cfg) {
         Ok(t) => {
             crate::history::record(&t);
-            let (mode, phonetic, phonetics, senses, tags) = if word_mode {
+            let mut card_payload = blank(if word_mode { "word" } else { "sentence" });
+            if word_mode {
                 let local = crate::dict_local::lookup(&source);
+                let mut vocab = Vec::new();
                 if let Some(z) = crate::translate::zh_lookup(&source) {
                     // 在线释义更全更口语，优先；音标/考试标签用本地库补齐
-                    let mut ph = Vec::new();
                     if !z.uk.is_empty() {
-                        ph.push(Phonetic { label: "英".into(), text: format!("/{}/", z.uk) });
+                        vocab.push(PhonLabel { label: "英".into(), text: format!("/{}/", z.uk) });
                     }
                     if !z.us.is_empty() && z.us != z.uk {
-                        ph.push(Phonetic { label: "美".into(), text: format!("/{}/", z.us) });
+                        vocab.push(PhonLabel { label: "美".into(), text: format!("/{}/", z.us) });
                     }
-                    if ph.is_empty() {
+                    if vocab.is_empty() {
                         if let Some(l) = &local {
                             if !l.phonetic.is_empty() {
-                                ph.push(Phonetic { label: String::new(), text: format!("/{}/", l.phonetic) });
+                                vocab.push(PhonLabel { label: String::new(), text: format!("/{}/", l.phonetic) });
                             }
                         }
                     }
-                    let phonetic = ph.first().map(|p| p.text.clone()).unwrap_or_default();
-                    let senses = z
+                    card_payload.senses = z
                         .senses
                         .into_iter()
-                        .map(|s| Sense { pos: s.pos, defs: s.defs, examples: s.examples, zh: s.zh })
-                        .collect::<Vec<_>>();
-                    let tags = local.as_ref().map(|l| l.tags.clone()).unwrap_or_default();
-                    ("word".to_string(), phonetic, ph, senses, tags)
+                        .map(|s| CardSense { pos: s.pos, defs: s.defs, examples: s.examples, zh: s.zh })
+                        .collect();
+                    card_payload.tags = local.as_ref().map(|l| l.tags.clone()).unwrap_or_default();
                 } else if let Some(l) = local {
                     // 断网 / 有道没收录：直接用内置词库
-                    let mut ph = Vec::new();
                     if !l.phonetic.is_empty() {
-                        ph.push(Phonetic { label: String::new(), text: format!("/{}/", l.phonetic) });
+                        vocab.push(PhonLabel { label: String::new(), text: format!("/{}/", l.phonetic) });
                     }
-                    let phonetic = ph.first().map(|p| p.text.clone()).unwrap_or_default();
-                    let senses = crate::dict_local::senses_of(&l)
+                    card_payload.senses = crate::dict_local::senses_of(&l)
                         .into_iter()
-                        .map(|(pos, items)| Sense { pos, defs: items, examples: Vec::new(), zh: true })
-                        .collect::<Vec<_>>();
-                    ("word".to_string(), phonetic, ph, senses, l.tags.clone())
-                } else {
-                    match crate::translate::lookup(&source) {
-                        Ok(d) => (
-                            "word".to_string(),
-                            d.phonetic,
-                            d.phonetics
-                                .into_iter()
-                                .map(|p| Phonetic { label: p.label, text: p.text })
-                                .collect(),
-                            d.senses
-                                .into_iter()
-                                .map(|s| Sense { pos: s.pos, defs: s.defs, examples: s.examples, zh: s.zh })
-                                .collect(),
-                            Vec::new(),
-                        ),
-                        Err(_) => ("sentence".to_string(), String::new(), Vec::new(), Vec::new(), Vec::new()),
-                    }
+                        .map(|(pos, items)| CardSense { pos, defs: items, examples: Vec::new(), zh: true })
+                        .collect();
+                    card_payload.tags = l.tags.clone();
+                } else if let Ok(d) = crate::translate::lookup(&source) {
+                    vocab = d
+                        .phonetics
+                        .into_iter()
+                        .map(|p| PhonLabel { label: p.label, text: p.text })
+                        .collect();
+                    card_payload.senses = d
+                        .senses
+                        .into_iter()
+                        .map(|s| CardSense { pos: s.pos, defs: s.defs, examples: s.examples, zh: s.zh })
+                        .collect();
                 }
-            } else {
-                let none = Vec::new();
-                ("sentence".to_string(), String::new(), Vec::new(), none, Vec::new())
-            };
-            let _ = crate::bubble_helper::show_panel(
-                panel_title(&t.detected, &t.target, &t.provider),
-                source.clone(),
-                t.text.clone(),
-                false,
-                None,
-                mode,
-                phonetic,
-                phonetics,
-                tags,
-                None,
-                senses,
-                lx,
-                ly,
+                card_payload.phonetic = vocab.first().map(|p| p.text.clone()).unwrap_or_default();
+                card_payload.phonetics = vocab;
+            }
+            present(
+                &app,
+                Card {
+                    title: panel_title(&t.detected, &t.target, &t.provider),
+                    source: source.clone(),
+                    text: t.text.clone(),
+                    loading: false,
+                    error: None,
+                    payload: card_payload,
+                    lx,
+                    ly,
+                },
             );
         }
         Err(e) => {
-            let _ = crate::bubble_helper::show_panel(
-                "翻译失败".into(),
-                source.clone(),
-                String::new(),
-                false,
-                Some(e),
-                "sentence".into(),
-                String::new(),
-                Vec::new(),
-                Vec::new(),
-                None,
-                Vec::new(),
-                lx,
-                ly,
+            present(
+                &app,
+                Card {
+                    title: "翻译失败".into(),
+                    source: source.clone(),
+                    text: String::new(),
+                    loading: false,
+                    error: Some(e),
+                    payload: blank("sentence"),
+                    lx,
+                    ly,
+                },
             );
         }
     }
-    let _ = app.get_webview_window("bubble"); // 保留 AppHandle 使用，避免未使用告警
 }
 
 /// 菜单栏「翻译剪贴板」：直接用当前光标位置弹结果。

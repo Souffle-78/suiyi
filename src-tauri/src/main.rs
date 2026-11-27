@@ -32,6 +32,94 @@ struct BubblePayload {
     provider: String,
     loading: bool,
     error: Option<String>,
+    /// 单词卡片的附加信息（Windows/Linux 的 webview 气泡用它渲染词典样式）
+    #[serde(default)]
+    card: Option<CardPayload>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+pub struct CardPayload {
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub phonetic: String,
+    #[serde(default)]
+    pub phonetics: Vec<PhonLabel>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub senses: Vec<CardSense>,
+    #[serde(default)]
+    pub ai: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+pub struct PhonLabel {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+pub struct CardSense {
+    #[serde(default)]
+    pub pos: String,
+    #[serde(default)]
+    pub defs: Vec<String>,
+    #[serde(default)]
+    pub examples: Vec<String>,
+    #[serde(default)]
+    pub zh: bool,
+}
+
+impl CardPayload {
+    /// 纯文本版（老版本气泡 / 复制用）
+    pub fn plain(&self) -> String {
+        let mut out = String::new();
+        for s in &self.senses {
+            if s.defs.is_empty() {
+                continue;
+            }
+            if !s.pos.is_empty() {
+                out.push_str(&s.pos);
+                out.push(' ');
+            }
+            out.push_str(&s.defs.join("；"));
+            out.push('\n');
+        }
+        if let Some(ai) = &self.ai {
+            if !ai.is_empty() {
+                out.push_str("\nAI 精解\n");
+                out.push_str(ai);
+            }
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// 非 macOS（或助手不可用）时，用 webview 气泡画卡片。
+pub fn present_card(app: &AppHandle, card: crate::translate_flow::Card) {
+    let body = if card.text.is_empty() && !card.loading {
+        card.payload.plain()
+    } else {
+        card.text.clone()
+    };
+    show_bubble(
+        app,
+        card.lx as i32,
+        card.ly as i32,
+        BubblePayload {
+            source: card.source,
+            text: body,
+            detected: String::new(),
+            target: String::new(),
+            provider: card.title,
+            loading: card.loading,
+            error: card.error,
+            card: Some(card.payload),
+        },
+    );
 }
 
 static SHOW_GEN: AtomicU64 = AtomicU64::new(0);
@@ -403,6 +491,7 @@ fn translate_given(app: &AppHandle, text: String) {
         provider: String::new(),
         loading: true,
         error: None,
+        card: None,
     });
     let app = app.clone();
     thread::spawn(move || {
@@ -418,6 +507,7 @@ fn translate_given(app: &AppHandle, text: String) {
                     provider: t.provider.clone(),
                     loading: false,
                     error: None,
+                    card: None,
                 });
             }
             Err(e) => {
@@ -429,6 +519,7 @@ fn translate_given(app: &AppHandle, text: String) {
                     provider: String::new(),
                     loading: false,
                     error: Some(e),
+                    card: None,
                 });
             }
         }
@@ -625,7 +716,7 @@ fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
     // macOS：气泡完全交给 NSPanel 助手（它才能盖在别的 App 的全屏空间上）。
     // webview 气泡在 macOS 上已经退役——只在助手不可用时兜底，避免出现两个气泡。
     #[cfg(target_os = "macos")]
-    if bubble_helper::ensure_running() {
+    if std::env::var("SUIYI_FORCE_WEBVIEW").as_deref() != Ok("1") && bubble_helper::ensure_running() {
         let _ = (x, y, &payload);
         return 0;
     }
@@ -661,7 +752,15 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
     let win = win.clone();
     float_over_every_space(&win);
     let width = 380.0;
-    let height = if payload.loading { 120.0 } else { 200.0 };
+    let word = payload.card.as_ref().map(|c| c.mode == "word").unwrap_or(false);
+    let has_ai = payload.card.as_ref().map(|c| c.ai.is_some()).unwrap_or(false);
+    let height = if payload.loading {
+        120.0
+    } else if word {
+        if has_ai { 460.0 } else { 340.0 }
+    } else {
+        200.0
+    };
 
     let monitor = pick_monitor(app, x, y);
     let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
@@ -742,6 +841,8 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
         let handler_app = app.clone();
         let handler_shared = shared.clone();
         let pressed: std::cell::Cell<Option<(f64, f64, Instant)>> = std::cell::Cell::new(None);
+        // 连续点击计数：双击选词、三击选段落也能触发（很多人根本不拖拽）
+        let last_up: std::cell::Cell<Option<(Instant, f64, f64, u8)>> = std::cell::Cell::new(None);
 
         let result = hook::listen(move |ev| {
             if trace {
@@ -756,7 +857,18 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
                 hook::MouseEvent::Dragged(x, y) => note_cursor(x, y),
                 hook::MouseEvent::Up(x, y) => {
                     let Some((sx, sy, at)) = pressed.take() else { return };
-                    on_release(&handler_app, &handler_shared, sx, sy, at, x, y);
+                    let clicks = match last_up.take() {
+                        Some((t, px, py, n))
+                            if t.elapsed() < Duration::from_millis(420)
+                                && (x - px).abs() < 8.0
+                                && (y - py).abs() < 8.0 =>
+                        {
+                            (n + 1).min(3)
+                        }
+                        _ => 1,
+                    };
+                    last_up.set(Some((Instant::now(), x, y, clicks)));
+                    on_release(&handler_app, &handler_shared, sx, sy, at, x, y, clicks);
                 }
             }
         });
@@ -784,6 +896,7 @@ fn on_release(
     at: Instant,
     x: f64,
     y: f64,
+    clicks: u8,
 ) {
     if !shared.enabled.load(Ordering::Relaxed) {
         return;
@@ -791,8 +904,10 @@ fn on_release(
     let dx = x - sx;
     let dy = y - sy;
     let dragged = (dx * dx + dy * dy).sqrt() >= 7.0;
-    log::line(format!("release dragged={dragged} at ({x:.0},{y:.0})"));
-    if !dragged || at.elapsed() > Duration::from_secs(6) {
+    log::line(format!("release dragged={dragged} clicks={clicks} at ({x:.0},{y:.0})"));
+    // 拖动 = 拖选；双击/三击 = 选词/选段落（这两类人很常见，之前完全没接）
+    let picked = dragged || clicks >= 2;
+    if !picked || at.elapsed() > Duration::from_secs(6) {
         return;
     }
     if inside_own_window(app, x as i32, y as i32) {
@@ -803,7 +918,8 @@ fn on_release(
     let app = app.clone();
     let shared = shared.clone();
     thread::spawn(move || {
-        thread::sleep(Duration::from_millis(60));
+        // 给目标应用一点时间把「点击 → 选中」和窗口激活处理完，再发 ⌘C
+        thread::sleep(Duration::from_millis(120));
         log::line("capturing selection…");
         let Some(text) = capture::select_text() else {
             log::line("no selection captured");
@@ -820,6 +936,7 @@ fn on_release(
                         provider: String::new(),
                         loading: false,
                         error: Some("需要「辅助功能」权限才能读取选区：系统设置 → 隐私与安全性 → 辅助功能 → 勾选随译".into()),
+                        card: None,
                     },
                 );
             }
@@ -856,6 +973,7 @@ fn on_release(
                 provider: cfg.provider.clone(),
                 loading: true,
                 error: None,
+                card: None,
             },
         );
         let payload = match translate::run(&text, &cfg) {
@@ -869,6 +987,7 @@ fn on_release(
                     provider: t.provider,
                     loading: false,
                     error: None,
+                    card: None,
                 }
             }
             Err(e) => BubblePayload {
@@ -879,6 +998,7 @@ fn on_release(
                 provider: cfg.provider.clone(),
                 loading: false,
                 error: Some(e),
+                card: None,
             },
         };
         let gen = show_bubble(&app, bx, by, payload);
@@ -1141,6 +1261,7 @@ fn main() {
                                 provider: "probe".into(),
                                 loading: false,
                                 error: None,
+                                card: None,
                             });
                             log::line(format!("probe bubble #{n} shown"));
                         }
@@ -1231,6 +1352,7 @@ fn main() {
                             provider: String::new(),
                             loading: false,
                             error: Some("剪贴板里没有可翻译的文字".into()),
+                            card: None,
                         }); }
                     },
                     "toggle" => {
@@ -1318,6 +1440,7 @@ fn main() {
                             provider: "local".into(),
                             loading: false,
                             error: None,
+                            card: None,
                         },
                     );
                 }
@@ -1396,6 +1519,7 @@ fn main() {
                             provider: "local".into(),
                             loading: false,
                             error: None,
+                            card: None,
                         },
                     );
                 }
