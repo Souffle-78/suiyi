@@ -1022,6 +1022,46 @@ fn translate_and_show_with_autohide(app: &AppHandle, text: String, x: i32, y: i3
     crate::translate_flow::translate_and_show(app.clone(), text, x as f64, y as f64);
 }
 
+/// 显示器被拔掉/换了缩放之后，已经显示的卡片可能整个落在屏幕外（用户只看到它消失）。
+/// 每 2 秒检查一次：卡片中心不在任何显示器里，就按原锚点重新贴边。
+#[cfg(not(target_os = "macos"))]
+fn keep_bubble_on_screen(app: &AppHandle) {
+    use tauri::Manager;
+    let Some(win) = app.get_webview_window("bubble") else { return };
+    if !win.is_visible().unwrap_or(false) {
+        return;
+    }
+    let Ok(pos) = win.outer_position() else { return };
+    let Ok(size) = win.outer_size() else { return };
+    let cx = pos.x as f64 + size.width as f64 / 2.0;
+    let cy = pos.y as f64 + size.height as f64 / 2.0;
+    let monitors = app.available_monitors().unwrap_or_default();
+    if monitors.is_empty() {
+        return;
+    }
+    let on_some = monitors.iter().any(|m| {
+        let mp = m.position();
+        let ms = m.size();
+        cx >= mp.x as f64
+            && cy >= mp.y as f64
+            && cx <= (mp.x + ms.width as i32) as f64
+            && cy <= (mp.y + ms.height as i32) as f64
+    });
+    if on_some {
+        return;
+    }
+    let anchor = LAST_ANCHOR.lock().ok().and_then(|g| *g).unwrap_or_else(last_cursor);
+    let h = size.height as f64 / monitors
+        .iter()
+        .find(|m| m.position().x == 0 && m.position().y == 0)
+        .or_else(|| monitors.first())
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let (px, py) = place_bubble(app, anchor.0, anchor.1, BUBBLE_WIDTH, h);
+    log::line(format!("bubble was off-screen — moved back to ({px},{py})"));
+    let _ = win.set_position(tauri::PhysicalPosition::new(px, py));
+}
+
 /// 每个气泡都挂一份自动收起：鼠标停在上面就暂停，离开 25 秒后隐藏；
 /// 5 分钟硬兜底，避免某些点击路径把倒计时重置成永不结束。
 fn schedule_bubble_autohide(app: &AppHandle, gen: u64) {
@@ -1029,6 +1069,7 @@ fn schedule_bubble_autohide(app: &AppHandle, gen: u64) {
     thread::spawn(move || {
         let started = Instant::now();
         let mut last_active = started;
+        let mut last_check = started;
         loop {
             thread::sleep(Duration::from_millis(400));
             if BUBBLE_HOVER.load(Ordering::Relaxed) {
@@ -1039,6 +1080,11 @@ fn schedule_bubble_autohide(app: &AppHandle, gen: u64) {
                         last_active = t;
                     }
                 }
+            }
+            #[cfg(not(target_os = "macos"))]
+            if last_check.elapsed() >= Duration::from_secs(2) {
+                last_check = Instant::now();
+                keep_bubble_on_screen(&app_hide);
             }
             if last_active.elapsed() >= Duration::from_secs(25) {
                 break;
