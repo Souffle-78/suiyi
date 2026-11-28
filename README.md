@@ -130,10 +130,12 @@ Windows 上怎么判断「这次拖拽到底选中了没有」：拖拽落点如
 把文本的包围盒和这次拖拽的矩形求交，对不上就判定为「选区别处」放弃。这样按住左键在空白处划一下
 不会再把上一次的残留选区翻出来。
 
-排障开关（两个都可以单独设）：
+排障开关（可以单独设，也可以组合）：
 
 - `SUIYI_NO_COPY=1`：跳过模拟 Ctrl+C，只用 UI Automation 读选区（慢一点，但对 Chromium/Office/WPF/UWP/记事本都有效）。
 - `SUIYI_NO_AX=1`：反过来，只用模拟 Ctrl+C（某些自绘控件、远程桌面里 UIA 会一直报「没有选区」时用这个）。
+- `SUIYI_DEBUG_COPY=1`：把复制这条路每一步写进日志（`copy: fg class=…`、`copy: attempt N seq=…`、
+  `copy: poll len=… wrote=… captured=…`），划词抓不到时先开这个看看到底卡在哪一步。
 
 `.github/workflows/release.yml` 里已经把双端的依赖和构建矩阵写好了（打 tag 触发，并自动把安装包挂到 Release）。
 
