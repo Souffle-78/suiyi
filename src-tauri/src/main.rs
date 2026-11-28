@@ -1241,7 +1241,17 @@ fn on_release(
         // 给目标应用一点时间把「点击 → 选中」和窗口激活处理完，再发 ⌘C
         thread::sleep(Duration::from_millis(120));
         log::line("capturing selection…");
-        let Some(text) = capture::select_text() else {
+        let (cpx, cpy) = cursor_physical(&app, bx, by);
+        let (spx, spy) = cursor_physical(&app, sx as i32, sy as i32);
+        // 按下→松手的矩形（外扩 16px 容忍手抖/逐字拖选），用来确认选区真的在划过的地方，
+        // 而不是程序里上一次残留的选区。
+        let drag_box = Some((
+            spx.min(cpx) - 16,
+            spy.min(cpy) - 16,
+            spx.max(cpx) + 16,
+            spy.max(cpy) + 16,
+        ));
+        let Some(text) = capture::select_text_at(Some((cpx, cpy)), drag_box) else {
             log::line("no selection captured");
             if !permissions::is_trusted() {
                 show_bubble(

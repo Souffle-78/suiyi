@@ -1,6 +1,6 @@
 [package]
 name = "suiyi"
-version = "0.8.1"
+version = "0.8.2"
 description = "随译 — 全局划词翻译"
 edition = "2021"
 rust-version = "1.77"
@@ -28,14 +28,16 @@ core-foundation = "0.10"
 objc = "0.2"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-enigo = "0.2"
 # UIA TextPattern 读选区（macOS 用 AX，Windows 等价物是 UI Automation）
 # DWM 用来给气泡上系统原生圆角（NSPanel 的 cornerRadius 等价物）
+# 模拟 Ctrl+C 直接用 SendInput（以前用 enigo，它在 debug 构建里会在键盘事件处静默
+# 打死进程，且多一层依赖没必要）
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
 ] }
 
