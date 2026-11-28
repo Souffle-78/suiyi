@@ -125,15 +125,19 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 `NSPanel` 换成一个 36×36 的置顶 webview 窗口；`AVSpeechSynthesizer` 换成 WebView2 的 `speechSynthesis`；
 `AXSelectedText` 换成 UI Automation 的 `TextPattern`；气泡高度由前端量内容后回传，不再写死。
 
-Windows 上怎么判断「这次拖拽到底选中了没有」：拖拽落点如果是桌面/任务栏这类 shell 表面，或者
+Windows 上怎么判断「这次拖拽到底选中了没有」：按下的点如果在桌面/任务栏这类 shell 表面上，或者
 松手时窗口不是前台窗口（Ctrl+C 会打到别的程序上、复制走它的旧选区），直接跳过；拿到选区后还会
-把文本的包围盒和这次拖拽的矩形求交，对不上就判定为「选区别处」放弃。这样按住左键在空白处划一下
+把文本的包围盒和这次拖拽的矩形求交，对不上就判定为「选区别处」放弃；碰到 Windows 11 记事本这种
+读不出选区的程序，则沿拖拽轨迹用 `RangeFromPoint` 探一下下方有没有文字。这样按住左键在空白处划一下
 不会再把上一次的残留选区翻出来。
 
 排障开关（可以单独设，也可以组合）：
 
 - `SLIP_NO_COPY=1`：跳过模拟 Ctrl+C，只用 UI Automation 读选区（慢一点，但对 Chromium/Office/WPF/UWP/记事本都有效）。
 - `SLIP_NO_AX=1`：反过来，只用模拟 Ctrl+C（某些自绘控件、远程桌面里 UIA 会一直报「没有选区」时用这个）。
+- `SLIP_NO_PRESS_SNAP=1`：不用「按下的那一刻是否已经有同样选区」这条判定（个别程序在按下时就报出
+  整段选区，会误杀单次拖选时用它）。
+- `SLIP_DEBUG_PRESS=1`：把按下时的快照与钩子延迟写进日志（`press snap: …`、`dbg down at …ms`）。
 - `SLIP_DEBUG_COPY=1`：把复制这条路每一步写进日志（`copy: fg class=…`、`copy: attempt N seq=…`、
   `copy: poll len=… wrote=… captured=…`），划词抓不到时先开这个看看到底卡在哪一步。
 
