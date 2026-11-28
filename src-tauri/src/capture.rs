@@ -442,34 +442,41 @@ fn send_copy() -> Option<()> {
 pub struct Target {
     pub class: String,
     pub is_focused: bool,
+    /// 当前前台窗口的类名。用来区分「松手在桌面上、但前台还是编辑器」
+    /// （正常：拖到窗口外边缘继续选）和「松手在桌面上、前台也是桌面」（什么都没选）。
+    pub fg_class: String,
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn target_at(px: i32, py: i32) -> Target {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetAncestor, GetClassNameW, GetForegroundWindow, WindowFromPoint, GA_ROOT,
+        GetAncestor, GetForegroundWindow, WindowFromPoint, GA_ROOT,
     };
+    unsafe fn class_of(hwnd: windows::Win32::Foundation::HWND) -> String {
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetClassNameW, GA_ROOT};
+        let mut buf = [0u16; 256];
+        if hwnd.0.is_null() {
+            return String::new();
+        }
+        let root = GetAncestor(hwnd, GA_ROOT);
+        let root = if root.0.is_null() { hwnd } else { root };
+        let len = GetClassNameW(root, &mut buf).max(0) as usize;
+        String::from_utf16_lossy(&buf[..len.min(buf.len())])
+    }
     unsafe {
         let point = POINT { x: px, y: py };
         let hit = WindowFromPoint(point);
-        let root = if hit.0.is_null() {
-            hit
-        } else {
-            GetAncestor(hit, GA_ROOT)
-        };
-        let mut buf = [0u16; 256];
-        let len = if root.0.is_null() {
-            0
-        } else {
-            GetClassNameW(root, &mut buf).max(0) as usize
-        };
-        let class = String::from_utf16_lossy(&buf[..len.min(buf.len())]);
+        let class = class_of(hit);
         let fore = GetForegroundWindow();
-        let fore_root = if fore.0.is_null() { fore } else { GetAncestor(fore, GA_ROOT) };
+        let fg_class = class_of(fore);
+        let same = !hit.0.is_null()
+            && !fore.0.is_null()
+            && GetAncestor(hit, GA_ROOT) == GetAncestor(fore, GA_ROOT);
         Target {
             class,
-            is_focused: root == fore_root,
+            is_focused: same,
+            fg_class,
         }
     }
 }
@@ -477,7 +484,7 @@ pub fn target_at(px: i32, py: i32) -> Target {
 /// 桌面、任务栏、托盘溢出面板这些「外壳窗口」上没有可翻译的文字：
 /// 在上面划一下什么都不该发生（和 macOS 一致）。
 #[cfg(not(target_os = "macos"))]
-fn is_shell_class(class: &str) -> bool {
+pub fn is_shell_class(class: &str) -> bool {
     matches!(
         class,
         "Progman"
@@ -700,18 +707,15 @@ pub fn select_text_at(
     at: Option<(i32, i32)>,
     drag: Option<(i32, i32, i32, i32)>,
 ) -> Option<String> {
+    // 松手处是桌面/任务栏这类外壳表面时，绝大多数是在「什么都没选」的地方划了一下，
+    // 先快速放弃；但「从编辑器里拖出窗口边缘、在桌面上松手」也落在这里——那时前台
+    // 还是编辑器、拖拽确实选中了东西，所以交给下面的 UIA 校验和后置判定。
     #[cfg(not(target_os = "macos"))]
-    if let Some((px, py)) = at {
-        let target = target_at(px, py);
-        if is_shell_class(&target.class) {
-            crate::log::line(format!("skip: shell surface ({})", target.class));
-            return None;
-        }
-        if !target.is_focused {
-            crate::log::line(format!(
-                "skip: window under cursor is not focused ({})",
-                target.class
-            ));
+    let release_target = at.map(|(px, py)| target_at(px, py));
+    #[cfg(not(target_os = "macos"))]
+    if let Some(t) = &release_target {
+        if is_shell_class(&t.class) && is_shell_class(&t.fg_class) {
+            crate::log::line(format!("skip: shell surface ({})", t.class));
             return None;
         }
     }
@@ -741,6 +745,22 @@ pub fn select_text_at(
                 return None;
             }
             return Some(t);
+        }
+    }
+
+    // 走到这里说明 UIA 没给出「落在这次拖拽范围内」的选区，只剩模拟复制这条路。
+    // 模拟复制只能送到前台窗口：松手在普通窗口上时，那个窗口必须是前台窗口，否则
+    // Ctrl+C 会打到别的程序、把它的残留选区复制过来（「划空气也翻译」的根因）。
+    // 松手在外壳表面上（拖出窗口边缘）时，只要前台还有程序就继续——哨兵会保证
+    // 只接受这一次真的写进剪贴板的内容。
+    #[cfg(not(target_os = "macos"))]
+    if let Some(t) = &release_target {
+        if !is_shell_class(&t.class) && !t.is_focused {
+            crate::log::line(format!(
+                "skip: window under cursor is not focused ({})",
+                t.class
+            ));
+            return None;
         }
     }
 

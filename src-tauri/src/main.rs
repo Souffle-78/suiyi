@@ -1251,6 +1251,16 @@ fn on_release(
             spx.max(cpx) + 16,
             spy.max(cpy) + 16,
         ));
+        // 按下点就在桌面/任务栏这类外壳表面上：那一下按根不可能选中任何文字，
+        // 直接放弃，免得后面的模拟复制把别的程序的残留选区抓过来。
+        #[cfg(not(target_os = "macos"))]
+        {
+            let start = capture::target_at(spx, spy);
+            if capture::is_shell_class(&start.class) {
+                log::line(format!("skip: drag started on shell ({})", start.class));
+                return;
+            }
+        }
         let Some(text) = capture::select_text_at(Some((cpx, cpy)), drag_box) else {
             log::line("no selection captured");
             if !permissions::is_trusted() {
