@@ -173,8 +173,6 @@ mod ax {
     //! 拿不到的情况：控制台（conhost/Windows Terminal 的缓冲区）、部分 Qt/Java 程序，
     //! 以及以管理员权限运行、而本进程不是管理员的窗口（UIPI 限制）。
 
-    use windows::Win32::Foundation::POINT as WinPoint;
-    use windows::Win32::System::Com::SAFEARRAY;
     use windows::Win32::System::Ole::{
         SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound,
         SafeArrayUnaccessData,
@@ -184,8 +182,8 @@ mod ax {
         COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
-        IUIAutomationTextRange, UIA_TextPatternId,
+        CUIAutomation, IUIAutomation, IUIAutomationTextPattern, IUIAutomationTextRange,
+        UIA_TextPatternId,
     };
 
     /// 选区在屏幕上的矩形（物理像素，x/y/宽/高）。用来判断「这份选区是不是就在用户
@@ -412,6 +410,15 @@ fn send_copy() -> Option<()> {
     // 上发的是 KEYEVENTF_UNICODE + 虚拟键 0，记事本、部分 Electron/Qt 程序不把它当快捷键，
     // 于是「Ctrl+C 没生效」——这是划词偶发抓不到选区的原因之一。
     unsafe {
+        if std::env::var("SUIYI_DEBUG_COPY").is_ok() {
+            let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+            let mut buf = [0u16; 256];
+            let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut buf);
+            crate::log::line(format!(
+                "copy: fg class={:?}",
+                String::from_utf16_lossy(&buf[..n as usize])
+            ));
+        }
         if !key_event(VK_CONTROL, false) {
             return None;
         }
@@ -542,7 +549,13 @@ fn clipboard_seq() -> Option<u32> {
 #[cfg(not(target_os = "macos"))]
 fn clipboard_seq() -> Option<u32> {
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
-    unsafe { Some(GetClipboardSequenceNumber()) }
+    unsafe {
+        // 取不到（没有窗口站权限等）时返回 0，当作「不知道」而不是「没变化」
+        match GetClipboardSequenceNumber() {
+            0 => None,
+            n => Some(n),
+        }
+    }
 }
 
 /// Windows / Linux 没有 NSPasteboard 的 changeCount，用一个「哨兵」代替：
@@ -570,6 +583,7 @@ fn clipboard_select() -> Option<String> {
     let sentinel = clipboard_sentinel();
 
     // 第一次 ⌘C 可能落在「窗口刚被激活」的瞬间被吞掉，隔 180ms 再补一次
+    let dbg = std::env::var("SUIYI_DEBUG_COPY").is_ok();
     let mut grabbed: Option<String> = None;
     for attempt in 0..3 {
         if attempt > 0 {
@@ -582,7 +596,13 @@ fn clipboard_select() -> Option<String> {
         }
         // 哨兵写完之后记一次序号：之后序号没再变，就说明 Ctrl+C 根本没写剪贴板
         let seq_after_sentinel = clipboard_seq();
+        if dbg {
+            crate::log::line(format!("copy: attempt {attempt} seq={seq_after_sentinel:?}"));
+        }
         if send_copy().is_none() {
+            if dbg {
+                crate::log::line("copy: send_copy failed");
+            }
             continue;
         }
         let deadline = Instant::now() + Duration::from_millis(600);
@@ -603,10 +623,18 @@ fn clipboard_select() -> Option<String> {
                     continue;
                 }
                 let captured = match &sentinel {
-                    // 还是哨兵 → 复制没生效；不是哨兵 → 这次复制拿到了东西
-                    Some(s) => t != s.as_str() && wrote,
+                    // 哨兵是我们刚写进去的，只要现在不是它，就说明这次 Ctrl+C 真的写进了剪贴板。
+                    // （不额外要求序号变化：GetClipboardSequenceNumber 在某些环境里恒返回 0）
+                    Some(s) => t != s.as_str(),
                     None => fresh || t != before.trim(),
                 };
+                if dbg {
+                    crate::log::line(format!(
+                        "copy: poll len={} wrote={wrote} sentinel={} captured={captured}",
+                        t.len(),
+                        sentinel.is_some()
+                    ));
+                }
                 // changeCount 变了 / 不是哨兵 → 是这次复制的内容（哪怕和旧内容一样）
                 if captured {
                     grabbed = Some(t);
