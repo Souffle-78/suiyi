@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>随译</title>
+<title>素笺</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -208,7 +208,7 @@
     scheduleFit();
   }
 
-  window.__suiyiRender = (p) => { try { render(p); } catch (e) { log('render threw ' + e); } };
+  window.__slipRender = (p) => { try { render(p); } catch (e) { log('render threw ' + e); } };
 
   // 窗口高度由内容决定：先临时解除「撑满窗口」的限制，量出自然高度再报给 Rust。
   // （.card 平时是 height:calc(100vh-8px)，不解除就永远量到当前窗口高度）
@@ -231,8 +231,8 @@
   log('boot api=' + !!api + ' hasEvent=' + !!(api && api.event) + ' hasCore=' + !!(api && api.core));
 
   if (api) {
-    window.__suiyiRender = (p) => render(p);
-    api.event.listen('suiyi://payload', (e) => { log('event'); render(e.payload); });
+    window.__slipRender = (p) => render(p);
+    api.event.listen('slip://payload', (e) => { log('event'); render(e.payload); });
     // 窗口刚创建时 emit 可能早于本脚本执行，加载完主动拉一次最新内容
     api.core.invoke('bubble_state').then((p) => { log('state pull ' + !!p); if (p) render(p); }).catch((e) => log('state pull failed ' + e));
     $('close').onclick = () => { try { api.core.invoke('hide_bubble'); } catch (_) {} try { api.window.getCurrentWindow().hide(); } catch (_) {} };

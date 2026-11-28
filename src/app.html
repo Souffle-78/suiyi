@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<title>随译</title>
+<title>素笺</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -730,7 +730,7 @@ $('openInput').addEventListener('click', () => invoke('open_input_settings'));
 // ---------- 启动 ----------
 (async () => {
   await loadSettings();
-  $('ver').textContent = '0.8.2';
+  $('ver').textContent = '0.9.0';
   updateCount();
   const tab = new URLSearchParams(location.search).get('tab');
   switchTab(tab || 'translate');

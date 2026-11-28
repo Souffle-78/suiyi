@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "随译",
-  "version": "0.8.2",
-  "identifier": "com.souffle.suiyi",
+  "productName": "素笺",
+  "version": "0.9.0",
+  "identifier": "com.souffle.slip",
   "build": {
     "frontendDist": "../src",
     "beforeBuildCommand": "node scripts/make-helper.mjs"
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "bubble",
-        "title": "随译",
+        "title": "素笺",
         "url": "bubble.html",
         "width": 380,
         "height": 200,
@@ -29,7 +29,7 @@
       },
       {
         "label": "sel-icon",
-        "title": "随译",
+        "title": "素笺",
         "url": "icon.html",
         "width": 36,
         "height": 36,
@@ -45,7 +45,7 @@
       },
       {
         "label": "main",
-        "title": "随译",
+        "title": "素笺",
         "url": "app.html",
         "width": 1020,
         "height": 720,
@@ -57,7 +57,7 @@
       },
       {
         "label": "permission",
-        "title": "随译需要系统权限",
+        "title": "素笺需要系统权限",
         "url": "permission.html",
         "width": 460,
         "height": 300,
@@ -101,7 +101,7 @@
     "shortDescription": "全局划词翻译",
     "longDescription": "选中任意应用里的文字，立刻弹出译文。默认免费线路，可选 DeepSeek 精翻与术语表。",
     "macOS": {
-      "signingIdentity": "Suiyi Dev"
+      "signingIdentity": "Slip Dev"
     },
     "resources": [
       "resources/ecdict.sqlite"

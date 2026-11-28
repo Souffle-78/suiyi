@@ -1,7 +1,7 @@
 // tauri 的 beforeBuildCommand 要在 Windows / Linux / macOS 上都能跑。
 // Windows 的开发机通常没有 bash（Git Bash 不一定在 PATH 里），所以这里先判断平台：
 // 非 macOS 直接跳过（气泡助手本来就是 macOS 独有的 NSPanel 进程），
-// macOS 上才真正去调 scripts/make-helper.sh 编出 suiyi-helper。
+// macOS 上才真正去调 scripts/make-helper.sh 编出 slip-helper。
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";

@@ -21,7 +21,7 @@ fi
 
 SRC="src-tauri/helper/BubbleHelper.swift"
 OUT_DIR="src-tauri/helper/bin"
-OUT="$OUT_DIR/suiyi-helper"
+OUT="$OUT_DIR/slip-helper"
 mkdir -p "$OUT_DIR"
 
 if [[ ! -f "$SRC" ]]; then

@@ -3,7 +3,7 @@
   "bundle": {
     "resources": [
       "resources/ecdict.sqlite",
-      "helper/bin/suiyi-helper"
+      "helper/bin/slip-helper"
     ]
   }
 }

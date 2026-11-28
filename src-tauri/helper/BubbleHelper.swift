@@ -1,4 +1,4 @@
-// 随译 · 划词气泡助手（macOS）
+// 素笺 · 划词气泡助手（macOS）
 //
 // 为什么要单独一个进程：
 // 要让窗口盖在「别的 App 的全屏空间」上，窗口必须是创建时就带
@@ -12,9 +12,9 @@
 //   4. 单词（单个英文词）额外显示音标 + 词性 + 多条释义，句子只显示译文。
 //
 // 与主程序只通过 JSON 文件通信：
-//   ~/Library/Application Support/suiyi/bubble-request.json  ← 主程序写，助手轮询
-//   ~/Library/Application Support/suiyi/bubble-action.json   ← 助手写，主程序轮询
-//   ~/Library/Application Support/suiyi/bubble-shutdown      ← 主程序写，助手退出
+//   ~/Library/Application Support/slip/bubble-request.json  ← 主程序写，助手轮询
+//   ~/Library/Application Support/slip/bubble-action.json   ← 助手写，主程序轮询
+//   ~/Library/Application Support/slip/bubble-shutdown      ← 主程序写，助手退出
 //
 // 构建：scripts/make-helper.sh（swiftc），产物随 bundle 一起签名。
 
@@ -26,7 +26,7 @@ app.setActivationPolicy(.accessory)
 
 let supportDir = FileManager.default
     .homeDirectoryForCurrentUser
-    .appendingPathComponent("Library/Application Support/suiyi", isDirectory: true)
+    .appendingPathComponent("Library/Application Support/slip", isDirectory: true)
 try? FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
 let requestPath = supportDir.appendingPathComponent("bubble-request.json")
 let actionPath = supportDir.appendingPathComponent("bubble-action.json")
