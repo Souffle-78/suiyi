@@ -1,7 +1,7 @@
 //! 划词气泡助手（macOS）：把气泡交给一个独立的 NSPanel 进程去画。
 //!
 //! 为什么要拆进程见 `src-tauri/helper/BubbleHelper.swift` 顶部说明。这里只负责：
-//!   1. 保证助手在跑（按需拉起 bundle 里的 `suiyi-helper`）；
+//!   1. 保证助手在跑（按需拉起 bundle 里的 `slip-helper`）；
 //!   2. 把「小图标 / 结果面板」写进 `bubble-request.json`（带递增 seq，助手轮询刷新）；
 //!   3. 轮询 `bubble-action.json`，执行助手点出来的动作：
 //!      展开翻译（translate）、改原文后重译（retranslate）、复制（copy）、存生词（vocab）。
@@ -68,13 +68,13 @@ fn dir() -> PathBuf {
 #[cfg(target_os = "macos")]
 fn helper_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    // .../随译.app/Contents/MacOS/suiyi -> .../随译.app/Contents/Resources/helper/bin/suiyi-helper
+    // .../素笺.app/Contents/MacOS/slip -> .../素笺.app/Contents/Resources/helper/bin/slip-helper
     let resources = exe.parent()?.parent()?.join("Resources");
-    let p = resources.join("helper/bin/suiyi-helper");
+    let p = resources.join("helper/bin/slip-helper");
     if p.exists() {
         return Some(p);
     }
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("helper/bin/suiyi-helper");
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("helper/bin/slip-helper");
     if dev.exists() {
         return Some(dev);
     }
@@ -117,7 +117,7 @@ pub fn ensure_running() -> bool {
         return false;
     };
     let _ = std::fs::remove_file(dir().join("bubble-shutdown"));
-    // 助手自己的 stderr 落到 suiyi.log，方便排查划词卡片问题
+    // 助手自己的 stderr 落到 slip.log，方便排查划词卡片问题
     let helper_log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

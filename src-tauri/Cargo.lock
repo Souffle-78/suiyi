@@ -4004,6 +4004,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "slip"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "core-foundation 0.10.1",
+ "core-graphics 0.25.0",
+ "dirs 5.0.1",
+ "objc",
+ "rdev",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-single-instance",
+ "urlencoding",
+ "windows",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4150,29 +4173,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "suiyi"
-version = "0.8.2"
-dependencies = [
- "anyhow",
- "arboard",
- "core-foundation 0.10.1",
- "core-graphics 0.25.0",
- "dirs 5.0.1",
- "objc",
- "rdev",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-single-instance",
- "urlencoding",
- "windows",
-]
 
 [[package]]
 name = "swift-rs"

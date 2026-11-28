@@ -10,7 +10,7 @@ static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 fn cache_path() -> PathBuf {
     let mut p = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push("suiyi");
+    p.push("slip");
     p.push("ai-cache.json");
     p
 }

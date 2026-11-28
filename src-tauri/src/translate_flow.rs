@@ -23,7 +23,7 @@ pub fn is_single_word(text: &str) -> bool {
 
 fn panel_title(detected: &str, target: &str, provider: &str) -> String {
     if detected.is_empty() || target.is_empty() {
-        "随译".to_string()
+        "素笺".to_string()
     } else {
         format!("{detected} → {target} · {provider}")
     }

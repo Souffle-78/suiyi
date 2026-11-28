@@ -3,14 +3,14 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn path() -> std::path::PathBuf {
-    crate::config::dir().join("suiyi.log")
+    crate::config::dir().join("slip.log")
 }
 
 static READY: OnceLock<()> = OnceLock::new();
 
 pub fn line(msg: impl AsRef<str>) {
     let msg = msg.as_ref();
-    eprintln!("[suiyi] {msg}");
+    eprintln!("[slip] {msg}");
     READY.get_or_init(|| {
         if let Some(parent) = path().parent() {
             let _ = std::fs::create_dir_all(parent);

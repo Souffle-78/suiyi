@@ -2,6 +2,12 @@ use arboard::Clipboard;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+#[cfg(not(target_os = "macos"))]
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
+
 /// 优先用系统辅助功能接口直接读「当前焦点控件的选中文字」：
 /// 不碰剪贴板，也不会因为目标应用禁用了复制而失败。
 #[cfg(target_os = "macos")]
@@ -287,8 +293,163 @@ mod ax {
         }
     }
 
+    /// 这个点上有没有文字（只取前几个字判断，供「拖拽划过的地方到底有没有字」用）。
+    /// 记事本这类程序虽然报不出选区，但 RangeFromPoint 还能用来确认该点落在文本上。
+    pub fn text_at_point(px: i32, py: i32) -> Option<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_text_at_point(px, py));
+        });
+        rx.recv_timeout(std::time::Duration::from_millis(500))
+            .ok()
+            .flatten()
+    }
+
+    fn read_text_at_point(px: i32, py: i32) -> Option<String> {
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let initialized = hr.is_ok();
+            let result = (|| -> Option<String> {
+                let automation: IUIAutomation =
+                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+                let point = windows::Win32::Foundation::POINT { x: px, y: py };
+                let hit = automation.ElementFromPoint(point).ok()?;
+                let mut pattern: Option<IUIAutomationTextPattern> =
+                    hit.GetCurrentPatternAs(UIA_TextPatternId).ok();
+                if pattern.is_none() {
+                    if let Ok(walker) = automation.ControlViewWalker() {
+                        let mut node = hit.clone();
+                        for _ in 0..4 {
+                            let Ok(parent) = walker.GetParentElement(&node) else {
+                                break;
+                            };
+                            node = parent;
+                            if let Ok(p) = node.GetCurrentPatternAs(UIA_TextPatternId) {
+                                pattern = Some(p);
+                                break;
+                            }
+                        }
+                    }
+                }
+                let pattern = pattern?;
+                let range = pattern.RangeFromPoint(point).ok()?;
+                let text = range.GetText(8).ok()?.to_string();
+                let trimmed = text.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            })();
+            if initialized {
+                CoUninitialize();
+            }
+            result
+        }
+    }
+
     /// 读当前焦点控件的选区：文字 + 屏幕上各段的矩形。
     pub fn selection() -> Option<(String, Vec<(f64, f64, f64, f64)>)> {
+        selection_with(1200)
+    }
+
+    /// 从「屏幕上某个点下面的元素」读选区。焦点元素读不到时用它兜底：
+    /// 记事本这类程序有时焦点落在外壳节点上，而真正带 TextPattern 的是内容控件。
+    pub fn selection_at_point(px: i32, py: i32) -> Option<(String, Vec<(f64, f64, f64, f64)>)> {
+        let started = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_selection_at_point(px, py));
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_millis(600))
+            .ok();
+        let ms = started.elapsed().as_millis();
+        match outcome {
+            Some(Ok((text, rects))) => {
+                crate::log::line(&format!(
+                    "ax@point: {ms}ms, got {} chars ({} rects)",
+                    text.chars().count(),
+                    rects.len()
+                ));
+                Some((text, rects))
+            }
+            Some(Err(why)) => {
+                crate::log::line(&format!("ax@point: {ms}ms, {why}"));
+                None
+            }
+            None => {
+                crate::log::line(&format!("ax@point: {ms}ms, timeout"));
+                None
+            }
+        }
+    }
+
+    fn read_selection_at_point(
+        px: i32,
+        py: i32,
+    ) -> Result<(String, Vec<(f64, f64, f64, f64)>), &'static str> {
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let initialized = hr.is_ok();
+            let result = (|| -> Result<(String, Vec<(f64, f64, f64, f64)>), &'static str> {
+                let automation: IUIAutomation =
+                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|_| "CoCreateInstance failed")?;
+                let point = windows::Win32::Foundation::POINT { x: px, y: py };
+                let hit = automation
+                    .ElementFromPoint(point)
+                    .map_err(|_| "ElementFromPoint failed")?;
+                let mut pattern: Option<IUIAutomationTextPattern> =
+                    hit.GetCurrentPatternAs(UIA_TextPatternId).ok();
+                if pattern.is_none() {
+                    if let Ok(walker) = automation.ControlViewWalker() {
+                        let mut node = hit.clone();
+                        for _ in 0..4 {
+                            let Ok(parent) = walker.GetParentElement(&node) else {
+                                break;
+                            };
+                            node = parent;
+                            if let Ok(p) = node.GetCurrentPatternAs(UIA_TextPatternId) {
+                                pattern = Some(p);
+                                break;
+                            }
+                        }
+                    }
+                }
+                let pattern = pattern.ok_or("no TextPattern at point")?;
+                let ranges = pattern.GetSelection().map_err(|_| "GetSelection failed")?;
+                let count = ranges.Length().map_err(|_| "Length failed")?;
+                let mut out = String::new();
+                let mut rects = Vec::new();
+                for i in 0..count {
+                    let Ok(range) = ranges.GetElement(i) else {
+                        continue;
+                    };
+                    if let Ok(b) = range.GetText(-1) {
+                        let piece = b.to_string();
+                        if !piece.trim().is_empty() {
+                            rects.extend(rects_of(&range));
+                            out.push_str(&piece);
+                        }
+                    }
+                }
+                let trimmed = out.trim();
+                if trimmed.is_empty() {
+                    Err("selection empty")
+                } else {
+                    Ok((trimmed.to_string(), rects))
+                }
+            })();
+            if initialized {
+                CoUninitialize();
+            }
+            result
+        }
+    }
+
+    /// 同上，但可以指定超时预算（按下鼠标时取快照只用很短的预算，不能拖住钩子）。
+    pub fn selection_with(timeout_ms: u64) -> Option<(String, Vec<(f64, f64, f64, f64)>)> {
         // UIA 调用偶尔会卡在目标程序的 UI 线程上；放到独立线程里跑，超时就当读不到，
         // 绝不拖住抓选区的主流程。
         let started = std::time::Instant::now();
@@ -297,7 +458,7 @@ mod ax {
             let _ = tx.send(read_focused_selection());
         });
         let outcome = rx
-            .recv_timeout(std::time::Duration::from_millis(1200))
+            .recv_timeout(std::time::Duration::from_millis(timeout_ms))
             .ok();
         let ms = started.elapsed().as_millis();
         match outcome {
@@ -410,7 +571,7 @@ fn send_copy() -> Option<()> {
     // 上发的是 KEYEVENTF_UNICODE + 虚拟键 0，记事本、部分 Electron/Qt 程序不把它当快捷键，
     // 于是「Ctrl+C 没生效」——这是划词偶发抓不到选区的原因之一。
     unsafe {
-        if std::env::var("SUIYI_DEBUG_COPY").is_ok() {
+        if std::env::var("SLIP_DEBUG_COPY").is_ok() {
             let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
             let mut buf = [0u16; 256];
             let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut buf);
@@ -580,17 +741,26 @@ fn clipboard_sentinel() -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    Some(format!("\u{2}suiyi-{}-{}", std::process::id(), nanos))
+    Some(format!("\u{2}slip-{}-{}", std::process::id(), nanos))
 }
 
-fn clipboard_select() -> Option<String> {
+/// 返回 (抓到的文字, 是否与拖拽前剪贴板里的文字一模一样)。
+/// 后者只在辅助功能接口完全读不到选区时才拿来当兜底判据（见 select_text_at）。
+fn clipboard_select() -> Option<(String, bool)> {
     let mut cb = Clipboard::new().ok()?;
     let before = cb.get_text().ok().unwrap_or_default();
     let count_before = paste_change_count();
     let sentinel = clipboard_sentinel();
 
     // 第一次 ⌘C 可能落在「窗口刚被激活」的瞬间被吞掉，隔 180ms 再补一次
-    let dbg = std::env::var("SUIYI_DEBUG_COPY").is_ok();
+    let dbg = std::env::var("SLIP_DEBUG_COPY").is_ok();
+    if dbg {
+        crate::log::line(format!(
+            "copy: before len={} ({:?})",
+            before.chars().count(),
+            before.chars().take(20).collect::<String>()
+        ));
+    }
     let mut grabbed: Option<String> = None;
     for attempt in 0..3 {
         if attempt > 0 {
@@ -598,7 +768,10 @@ fn clipboard_select() -> Option<String> {
         }
         if let Some(s) = &sentinel {
             // 先把剪贴板泡在哨兵里；写失败也没关系，后面的判断会退回「内容变了」那条
-            let _ = cb.set_text(s.as_str());
+            let wrote_sentinel = cb.set_text(s.as_str()).is_ok();
+            if dbg {
+                crate::log::line(format!("copy: sentinel write ok={wrote_sentinel}"));
+            }
             sleep(Duration::from_millis(15));
         }
         // 哨兵写完之后记一次序号：之后序号没再变，就说明 Ctrl+C 根本没写剪贴板
@@ -637,9 +810,10 @@ fn clipboard_select() -> Option<String> {
                 };
                 if dbg {
                     crate::log::line(format!(
-                        "copy: poll len={} wrote={wrote} sentinel={} captured={captured}",
+                        "copy: poll len={} wrote={wrote} sentinel={} captured={captured} same_as_before={}",
                         t.len(),
-                        sentinel.is_some()
+                        sentinel.is_some(),
+                        !before.trim().is_empty() && t == before.trim()
                     ));
                 }
                 // changeCount 变了 / 不是哨兵 → 是这次复制的内容（哪怕和旧内容一样）
@@ -660,8 +834,11 @@ fn clipboard_select() -> Option<String> {
     // give the source app a beat before we overwrite the clipboard again
     sleep(Duration::from_millis(140));
     // 无论成功与否都要把剪贴板还原：失败时里面可能正躺着哨兵
-    let _ = cb.set_text(before);
-    grabbed
+    let _ = cb.set_text(before.clone());
+    grabbed.map(|t| {
+        let same = !before.trim().is_empty() && t == before.trim();
+        (t, same)
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -696,16 +873,107 @@ fn selection_matches_drag(rects: &[(f64, f64, f64, f64)], drag: Option<(i32, i32
     })
 }
 
+/// 按下鼠标那一刻的选区快照（代数 + 文字）。松手后如果读到的文字和它一模一样，
+/// 说明这次拖拽没有改变选区——典型场景：文档里已经有一段旧选中，用户在空白处又
+/// 顺手划了一下，此时的 Ctrl+C 会复制那段旧选区。不比较就翻，就是「划空气也翻译」。
+#[cfg(not(target_os = "macos"))]
+struct PressSnap {
+    gen: u64,
+    ready: bool,
+    text: Option<String>,
+}
+
+#[cfg(not(target_os = "macos"))]
+static PRESS_GEN: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "macos"))]
+static PRESS_SNAP: Mutex<PressSnap> = Mutex::new(PressSnap {
+    gen: 0,
+    ready: true,
+    text: None,
+});
+
+/// 按下鼠标时调一次：**同步**问一次当前选区存为快照（最多等 250ms）。
+/// 必须同步：异步线程可能拖到松手之后才跑，那时读到的已经是新选区，
+/// 快照就等于结果，「划空白」反而被当成有效划词。
+#[cfg(not(target_os = "macos"))]
+pub fn note_press_selection() {
+    let gen = PRESS_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let text = if std::env::var("SLIP_NO_PRESS_SNAP").is_ok() {
+        None
+    } else {
+        let started = std::time::Instant::now();
+        let hit = ax::selection_with(250).map(|(t, _)| t.trim().to_string()).filter(|t| !t.is_empty());
+        if std::env::var("SLIP_DEBUG_PRESS").is_ok() {
+            crate::log::line(format!(
+                "press snap: {:?} after {}ms",
+                hit.as_deref().map(|t| t.chars().count()),
+                started.elapsed().as_millis()
+            ));
+        }
+        hit
+    };
+    if let Ok(mut g) = PRESS_SNAP.lock() {
+        *g = PressSnap {
+            gen,
+            ready: true,
+            text,
+        };
+    }
+}
+
+/// 松手时用：等按下那一刻的快照就绪，再和这次读到的选区比。
+/// 相等说明这次拖拽没有改变选区（文档里本来就有旧选中，用户在空白处划了一下）。
+#[cfg(not(target_os = "macos"))]
+fn selection_unchanged_since_press(text: &str) -> bool {
+    let gen = PRESS_GEN.load(Ordering::SeqCst);
+    if gen == 0 {
+        return false;
+    }
+    let deadline = Instant::now() + Duration::from_millis(350);
+    loop {
+        {
+            let g = match PRESS_SNAP.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            if g.gen != gen {
+                return false;
+            }
+            if g.ready {
+                return g.text.as_deref() == Some(text);
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// 按下那一刻的快照是不是「什么都没选中」（含「根本没记录到按下」）。
+#[cfg(not(target_os = "macos"))]
+fn press_snapshot_blank() -> bool {
+    let gen = PRESS_GEN.load(Ordering::SeqCst);
+    if gen == 0 {
+        return true;
+    }
+    match PRESS_SNAP.lock() {
+        Ok(g) => g.gen == gen && g.ready && g.text.is_none(),
+        Err(_) => true,
+    }
+}
+
 /// Grab the current selection.
-///
 /// 顺序：先用辅助功能接口直接读（UI Automation / AX）——不碰剪贴板、不打扰用户、
 /// 也不会把别处的残留选区当成新的；读不到再退回模拟复制。
 ///
 /// `at` 是松手位置的物理像素坐标（Windows 用来确认「要复制的窗口确实是前台窗口」）。
 /// `drag` 是这次按下→松手的矩形（物理像素），用来校验选区真的在划过的地方。
+/// `allow_same` 为真时允许「选区跟按下时一模一样」（双击/三击重复选同一个词就是这样）。
 pub fn select_text_at(
     at: Option<(i32, i32)>,
     drag: Option<(i32, i32, i32, i32)>,
+    allow_same: bool,
 ) -> Option<String> {
     // 松手处是桌面/任务栏这类外壳表面时，绝大多数是在「什么都没选」的地方划了一下，
     // 先快速放弃；但「从编辑器里拖出窗口边缘、在桌面上松手」也落在这里——那时前台
@@ -720,11 +988,14 @@ pub fn select_text_at(
         }
     }
     #[cfg(target_os = "macos")]
-    let _ = at;
+    {
+        let _ = at;
+        let _ = allow_same;
+    }
 
     // 1) 辅助功能接口：快且无副作用
-    // 排障开关：某些老程序（或远程桌面会话）里 UIA 会拖住事件线程，设 SUIYI_NO_AX=1 就只用模拟复制。
-    let ax_enabled = std::env::var("SUIYI_NO_AX").is_err();
+    // 排障开关：某些老程序（或远程桌面会话）里 UIA 会拖住事件线程，设 SLIP_NO_AX=1 就只用模拟复制。
+    let ax_enabled = std::env::var("SLIP_NO_AX").is_err();
     let mut ax_hit = if ax_enabled { ax_selection() } else { None };
     // 有些程序（记事本、部分 RichEdit 控件）在松手的那一瞬间会短暂报「没有选区」，
     // 而它其实还留着上一次选中的文字。等 60ms 再问一次：要么拿到那份残留选区
@@ -733,15 +1004,36 @@ pub fn select_text_at(
         sleep(Duration::from_millis(60));
         ax_hit = ax_selection();
     }
+    // 焦点元素读不到时，再按「松手点下面的元素」问一次：记事本这类程序焦点可能落在
+    // 外壳节点上，而带 TextPattern 的是内容控件本身。
+    #[cfg(not(target_os = "macos"))]
+    if ax_hit.is_none() && ax_enabled {
+        if let Some((px, py)) = at {
+            ax_hit = ax::selection_at_point(px, py);
+        }
+    }
+    let ax_blind = ax_hit.is_none();
     if let Some((text, rects)) = ax_hit {
         let t = text.trim().to_string();
         if !t.is_empty() {
-            if !selection_matches_drag(&rects, drag) {
+            // 有包围盒且落在这次拖拽范围里 → 就是刚划出来的选区，直接采信。
+            // （合成输入下钩子回调可能延迟到拖拽结束，此时「按下快照」等于结果，
+            //  再拿它比对会误杀合法拖选；有包围盒就不需要这份快照了。）
+            if !rects.is_empty() {
+                if selection_matches_drag(&rects, drag) {
+                    return Some(t);
+                }
                 crate::log::line(format!(
                     "skip: selection is elsewhere ({} rects, drag {:?})",
                     rects.len(),
                     drag
                 ));
+                return None;
+            }
+            // 没有包围盒（Chrome 之类只给文字不给位置）→ 退回「选区在按下之后有没有变」
+            #[cfg(not(target_os = "macos"))]
+            if !allow_same && selection_unchanged_since_press(&t) {
+                crate::log::line("skip: selection did not change since press");
                 return None;
             }
             return Some(t);
@@ -765,15 +1057,35 @@ pub fn select_text_at(
     }
 
     // 排障开关：某些环境里模拟 Ctrl+C 会被拦（第三方输入法、热键冲突、远程桌面），
-    // 设 SUIYI_NO_COPY=1 就只用 UI Automation。
-    if std::env::var("SUIYI_NO_COPY").is_ok() {
+    // 设 SLIP_NO_COPY=1 就只用 UI Automation。
+    if std::env::var("SLIP_NO_COPY").is_ok() {
         crate::log::line("capture failed — ax:none (copy disabled)");
         return None;
     }
 
     // 2) 模拟复制兜底：控制台、部分 Qt/Java 程序读不到 TextPattern
+    //    辅助功能完全读不到选区时（Windows 11 记事本这类），先确认「拖拽划过的地方真的
+    //    有文字」。否则就是在一段旧选中的空白处划了一下，Ctrl+C 会把那段旧选中复制过来。
+    #[cfg(not(target_os = "macos"))]
+    if ax_blind && !allow_same {
+        if let Some((x0, y0, x1, y1)) = drag {
+            let cy = (y0 + y1) / 2;
+            let mut hits = 0;
+            for i in 0..=4 {
+                let cx = x0 + (x1 - x0) * i / 4;
+                if ax::text_at_point(cx, cy).is_some() {
+                    hits += 1;
+                }
+            }
+            if hits == 0 {
+                crate::log::line("skip: no text along the drag (ax blind)");
+                return None;
+            }
+        }
+    }
+
     match clipboard_select() {
-        Some(t) => {
+        Some((t, same_as_before)) => {
             let t = t.trim().to_string();
             if t.is_empty() {
                 None
@@ -790,6 +1102,22 @@ pub fn select_text_at(
                 ));
                 None
             } else {
+                #[cfg(not(target_os = "macos"))]
+                if !allow_same && selection_unchanged_since_press(&t) {
+                    crate::log::line("skip: selection did not change since press (copy)");
+                    return None;
+                }
+                // 辅助功能接口在按下和松手时都读不到选区（Windows 11 记事本这类富文本控件
+                // 就是这样），说明没有可靠的第二判据。这时如果模拟复制抓到的内容，跟拖拽前
+                // 剪贴板里本来就有的内容一模一样，最可能命中的是文档里那段旧选中被 Ctrl+C
+                // 又复制了一遍——宁可少翻一次，也不要「划空气也翻译」。
+                #[cfg(not(target_os = "macos"))]
+                if !allow_same && ax_blind && press_snapshot_blank() && same_as_before {
+                    crate::log::line(
+                        "skip: copied text equals clipboard before the drag (ax blind)",
+                    );
+                    return None;
+                }
                 Some(t)
             }
         }
@@ -801,5 +1129,5 @@ pub fn select_text_at(
 }
 
 pub fn select_text() -> Option<String> {
-    select_text_at(None, None)
+    select_text_at(None, None, true)
 }

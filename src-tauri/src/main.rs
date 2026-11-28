@@ -638,8 +638,8 @@ fn float_over_every_space(win: &tauri::WebviewWindow) {
         use objc::{msg_send, sel, sel_impl};
 
         // 实验：把窗口类换成 NSPanel（非激活面板），全屏空间里才肯浮出来。
-        // 只在 SUIYI_PANEL_TRICK=1 时启用，验证通过再默认打开。
-        if std::env::var("SUIYI_PANEL_TRICK").as_deref() == Ok("1") {
+        // 只在 SLIP_PANEL_TRICK=1 时启用，验证通过再默认打开。
+        if std::env::var("SLIP_PANEL_TRICK").as_deref() == Ok("1") {
             extern "C" {
                 fn objc_getClass(name: *const std::os::raw::c_char) -> *mut std::ffi::c_void;
                 fn object_setClass(
@@ -670,7 +670,7 @@ fn float_over_every_space(win: &tauri::WebviewWindow) {
                 let behavior: u64 = (1u64 << 0) | (1u64 << 4) | (1u64 << 8);
                 let _: () = msg_send![ns, setCollectionBehavior: behavior];
                 // 默认 NSPopUpMenuWindowLevel(101)：全屏应用之上要浮得住
-                let level: i64 = std::env::var("SUIYI_BUBBLE_LEVEL")
+                let level: i64 = std::env::var("SLIP_BUBBLE_LEVEL")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(101);
@@ -679,7 +679,7 @@ fn float_over_every_space(win: &tauri::WebviewWindow) {
                 let _: () = msg_send![ns, setHidesOnDeactivate: false];
                 // 主线程上调 order front（修掉之前 worker 线程 msg_send 的 SIGTRAP）
                 let _: () = msg_send![ns, orderFrontRegardless];
-                if std::env::var("SUIYI_ACTIVATE").as_deref() == Ok("1") {
+                if std::env::var("SLIP_ACTIVATE").as_deref() == Ok("1") {
                     let nsapp: *mut Object = msg_send![objc::class!(NSApplication), sharedApplication];
                     let _: () = msg_send![nsapp, activateIgnoringOtherApps: true];
                     let _: () = msg_send![ns, makeKeyAndOrderFront: std::ptr::null_mut::<Object>()];
@@ -848,14 +848,14 @@ fn show_bubble(app: &AppHandle, x: i32, y: i32, payload: BubblePayload) -> u64 {
     // macOS：气泡完全交给 NSPanel 助手（它才能盖在别的 App 的全屏空间上）。
     // webview 气泡在 macOS 上已经退役——只在助手不可用时兜底，避免出现两个气泡。
     #[cfg(target_os = "macos")]
-    if std::env::var("SUIYI_FORCE_WEBVIEW").as_deref() != Ok("1") && bubble_helper::ensure_running() {
+    if std::env::var("SLIP_FORCE_WEBVIEW").as_deref() != Ok("1") && bubble_helper::ensure_running() {
         let _ = (x, y, &payload);
         return 0;
     }
     let _ = app;
     // 实验：按需新建窗口。旧窗口固化在它创建时所在的空间，切到全屏空间后
     // canJoinAllSpaces 也不一定把它挪过来；新建的窗口会落在当前活动空间。
-    if std::env::var("SUIYI_FRESH_BUBBLE").as_deref() == Ok("1") {
+    if std::env::var("SLIP_FRESH_BUBBLE").as_deref() == Ok("1") {
         if let Some(old) = app.get_webview_window("bubble") {
             let _ = old.destroy();
         }
@@ -940,7 +940,7 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
     // 这里直接 eval 调用页面里的全局渲染函数，保证一定能画出来。
     match serde_json::to_string(&payload) {
         Ok(json) => {
-            let js = format!("window.__suiyiRender && window.__suiyiRender({json})");
+            let js = format!("window.__slipRender && window.__slipRender({json})");
             match win.eval(&js) {
                 Ok(()) => {}
                 Err(e) => log::line(format!("bubble eval failed: {e}")),
@@ -948,9 +948,9 @@ fn show_bubble_in(app: &AppHandle, win: &tauri::WebviewWindow, x: i32, y: i32, p
         }
         Err(e) => log::line(format!("bubble payload encode failed: {e}")),
     }
-    let _ = win.emit("suiyi://payload", payload);
+    let _ = win.emit("slip://payload", payload);
     #[cfg(target_os = "macos")]
-    if std::env::var("SUIYI_PANEL_TRANSPLANT").as_deref() == Ok("1") {
+    if std::env::var("SLIP_PANEL_TRANSPLANT").as_deref() == Ok("1") {
         let app2 = app.clone();
         let w2 = win.clone();
         let _ = app.run_on_main_thread(move || unsafe {
@@ -1129,9 +1129,14 @@ fn ensure_hook(app: AppHandle, shared: Arc<Shared>) {
     start_hook(app, shared);
 }
 
+/// 进程启动至今的毫秒数，仅用于排障日志里核对事件先后。
+fn app_ms() -> u128 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis()
+}
 fn start_hook(app: AppHandle, shared: Arc<Shared>) {
     thread::spawn(move || {
-        let trace = std::env::var("SUIYI_TRACE").is_ok();
+        let trace = std::env::var("SLIP_TRACE").is_ok();
         let handler_app = app.clone();
         let handler_shared = shared.clone();
         let pressed: std::cell::Cell<Option<(f64, f64, Instant)>> = std::cell::Cell::new(None);
@@ -1160,6 +1165,13 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
                 hook::MouseEvent::Down(x, y) => {
                     note_cursor(x, y);
                     pressed.set(Some((x, y, Instant::now())));
+                    if std::env::var("SLIP_DEBUG_PRESS").is_ok() {
+                        log::line(format!("dbg down at {}ms", app_ms()));
+                    }
+                    // 记一份「按下时的选区」：松手后如果读到的还是它，说明这次拖拽
+                    // 没改变任何选区（在空白处顺手划一下就是这样），不要翻译。
+                    #[cfg(not(target_os = "macos"))]
+                    capture::note_press_selection();
                     hide_bubble_if_outside(&handler_app, x, y);
                     hide_icon_if_outside(&handler_app, x, y);
                 }
@@ -1187,7 +1199,7 @@ fn start_hook(app: AppHandle, shared: Arc<Shared>) {
             // 把 HOOK_STARTED 复位，watchdog 会在用户勾选权限后自动重启钩子（无需重开 App）。
             HOOK_STARTED.store(false, Ordering::SeqCst);
             let hint = match permissions::input_monitoring() {
-                Some(false) => "（鼠标监听需要「输入监控」权限，请在 系统设置 → 隐私与安全性 → 输入监控 里勾选随译）",
+                Some(false) => "（鼠标监听需要「输入监控」权限，请在 系统设置 → 隐私与安全性 → 输入监控 里勾选素笺）",
                 _ => "（稍后自动重试）",
             };
             log::line(format!("input hook failed: {e:?} {hint}"));
@@ -1224,7 +1236,7 @@ fn on_release(
     let dx = x - sx;
     let dy = y - sy;
     let dragged = (dx * dx + dy * dy).sqrt() >= 7.0;
-    log::line(format!("release dragged={dragged} clicks={clicks} at ({x:.0},{y:.0})"));
+    log::line(format!("release dragged={dragged} clicks={clicks} at ({x:.0},{y:.0}) [{}ms]", app_ms()));
     // 拖动 = 拖选；双击/三击 = 选词/选段落（这两类人很常见，之前完全没接）
     let picked = dragged || clicks >= 2;
     if !picked || at.elapsed() > Duration::from_secs(6) {
@@ -1261,7 +1273,7 @@ fn on_release(
                 return;
             }
         }
-        let Some(text) = capture::select_text_at(Some((cpx, cpy)), drag_box) else {
+        let Some(text) = capture::select_text_at(Some((cpx, cpy)), drag_box, clicks >= 2) else {
             log::line("no selection captured");
             if !permissions::is_trusted() {
                 show_bubble(
@@ -1275,7 +1287,7 @@ fn on_release(
                         target: String::new(),
                         provider: String::new(),
                         loading: false,
-                        error: Some("需要「辅助功能」权限才能读取选区：系统设置 → 隐私与安全性 → 辅助功能 → 勾选随译".into()),
+                        error: Some("需要「辅助功能」权限才能读取选区：系统设置 → 隐私与安全性 → 辅助功能 → 勾选素笺".into()),
                         card: None,
                     },
                 );
@@ -1482,8 +1494,10 @@ fn close_permission_window(app: AppHandle) {
 }
 
 fn main() {
-    // 无界面自检：SUIYI_PROBE=1 ./suiyi
-    if let Ok(mode) = std::env::var("SUIYI_PROBE") {
+    // 改名（随译 → 素笺）后，第一次运行时把旧数据目录搬过来
+    config::migrate_legacy();
+    // 无界面自检：SLIP_PROBE=1 ./slip
+    if let Ok(mode) = std::env::var("SLIP_PROBE") {
         if mode == "autostart" {
             // 交给 setup 里的自检分支处理（需要 AppHandle）
         } else if mode == "icon" {
@@ -1505,7 +1519,7 @@ fn main() {
             return;
         }
         if mode == "dict" {
-            let word = std::env::var("SUIYI_PROBE_WORD").unwrap_or_else(|_| "action".into());
+            let word = std::env::var("SLIP_PROBE_WORD").unwrap_or_else(|_| "action".into());
             match translate::zh_lookup(&word) {
                 Some(z) => println!("zh {}", serde_json::to_string(&z).unwrap_or_default()),
                 None => match translate::lookup(&word) {
@@ -1608,8 +1622,8 @@ fn main() {
             Some(vec!["--autostart"]),
         ))
         .setup(move |app| {
-            // 自检：SUIYI_PROBE=autostart ./suiyi
-            if std::env::var("SUIYI_PROBE").as_deref() == Ok("autostart") {
+            // 自检：SLIP_PROBE=autostart ./slip
+            if std::env::var("SLIP_PROBE").as_deref() == Ok("autostart") {
                 use tauri_plugin_autostart::ManagerExt;
                 let manager = app.autolaunch();
                 println!("before -> {:?}", manager.is_enabled());
@@ -1631,11 +1645,11 @@ fn main() {
             bubble_helper::start_action_watcher(app.handle().clone());
             bubble_helper::ensure_running();
 
-            // 自检：SUIYI_PROBE=icon ./suiyi —— 直接让助手弹一个单词卡片的小图标，
+            // 自检：SLIP_PROBE=icon ./slip —— 直接让助手弹一个单词卡片的小图标，
             // 方便在没人手动划词时验证卡片交互（不依赖真实选区）。
             #[cfg(target_os = "macos")]
-            if std::env::var("SUIYI_PROBE").as_deref() == Ok("icon") {
-                let word = std::env::var("SUIYI_PROBE_WORD").unwrap_or_else(|_| "resilient".into());
+            if std::env::var("SLIP_PROBE").as_deref() == Ok("icon") {
+                let word = std::env::var("SLIP_PROBE_WORD").unwrap_or_else(|_| "resilient".into());
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(800));
                     if bubble_helper::show_icon(&word, 640.0, 360.0) {
@@ -1651,7 +1665,7 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             if let Some(bubble) = app.get_webview_window("bubble") {
                 float_over_every_space(&bubble);
-                if std::env::var("SUIYI_PROBE").as_deref() == Ok("bubbleshow") {
+                if std::env::var("SLIP_PROBE").as_deref() == Ok("bubbleshow") {
                     let h = app.handle().clone();
                     std::thread::spawn(move || {
                         let mut n = 0;
@@ -1671,7 +1685,7 @@ fn main() {
                             log::line(format!("probe bubble #{n} shown"));
                         }
                     });
-                } else if std::env::var("SUIYI_PROBE").as_deref() == Ok("bubble") {
+                } else if std::env::var("SLIP_PROBE").as_deref() == Ok("bubble") {
                     #[cfg(target_os = "macos")]
                     unsafe {
                         use objc::runtime::Object;
@@ -1693,7 +1707,7 @@ fn main() {
 
             #[cfg(target_os = "macos")]
             {
-                let policy = std::env::var("SUIYI_POLICY").unwrap_or_default();
+                let policy = std::env::var("SLIP_POLICY").unwrap_or_default();
                 if policy == "accessory" {
                     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
                     log::line("activation policy forced to accessory (probe)");
@@ -1722,7 +1736,7 @@ fn main() {
             let clip_item = MenuItem::with_id(app, "clip", "翻译剪贴板", true, None::<&str>)?;
             #[cfg(target_os = "macos")]
             let perm = MenuItem::with_id(app, "perm", "辅助功能权限…", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出随译", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出素笺", true, None::<&str>)?;
             // Windows / Linux 没有系统权限流程（permissions::open_settings 是空实现），
             // 菜单里不摆这一项，免得点了没反应。
             #[cfg(target_os = "macos")]
@@ -1740,7 +1754,7 @@ fn main() {
 
             // 菜单栏图标必须看得见：bundle 图标偶尔取不到（default_window_icon 为 None 时
             // NSStatusItem 会变成一条看不见的空白），所以额外挂文字标题兜底。
-            let mut tray = TrayIconBuilder::new().tooltip("随译 · 选中即翻译");
+            let mut tray = TrayIconBuilder::new().tooltip("素笺 · 选中即翻译");
             match app.default_window_icon() {
                 Some(icon) => {
                     log::line(format!("tray icon from bundle: {}x{}", icon.width(), icon.height()));
@@ -1823,7 +1837,7 @@ fn main() {
                 log::line("accessibility permission missing — asking");
                 permissions::request();
             } else if listening_now == Some(false) {
-                log::line("input monitoring missing — 鼠标监听需要它，请在 系统设置 → 隐私与安全性 → 输入监控 里勾选随译");
+                log::line("input monitoring missing — 鼠标监听需要它，请在 系统设置 → 隐私与安全性 → 输入监控 里勾选素笺");
                 show_permission_window(&handle);
             }
 
@@ -1857,7 +1871,7 @@ fn main() {
                         BubblePayload {
                             source: "权限已开启".into(),
                             text: "现在可以划词了：在任意应用里拖选一段文字，松开鼠标就会翻译。".into(),
-                            detected: "suiyi".into(),
+                            detected: "slip".into(),
                             target: "ready".into(),
                             provider: "local".into(),
                             loading: false,
@@ -1921,13 +1935,13 @@ fn main() {
                     "系统托盘（右下角 ^ 里）"
                 };
                 let hello_text = format!(
-                    "选中任意应用里的文字、松开鼠标，就会在选区旁边先冒出一个小图标；\n点它（或悬停一下）才展开译文。单词会额外显示音标和词性释义。\n想调语言、线路或术语表，去{tray_hint}的「随译」菜单。"
+                    "选中任意应用里的文字、松开鼠标，就会在选区旁边先冒出一个小图标；\n点它（或悬停一下）才展开译文。单词会额外显示音标和词性释义。\n想调语言、线路或术语表，去{tray_hint}的「素笺」菜单。"
                 );
                 #[cfg(target_os = "macos")]
                 {
                     let _ = bubble_helper::show_panel(
-                        format!("suiyi → {version} · local"),
-                        "随译已启动".into(),
+                        format!("slip → {version} · local"),
+                        "素笺已启动".into(),
                         hello_text.clone(),
                         false,
                         None,
@@ -1948,9 +1962,9 @@ fn main() {
                         lx,
                         ly,
                         BubblePayload {
-                            source: "随译已启动".into(),
+                            source: "素笺已启动".into(),
                             text: hello_text,
-                            detected: "suiyi".into(),
+                            detected: "slip".into(),
                             target: version.into(),
                             provider: "local".into(),
                             loading: false,

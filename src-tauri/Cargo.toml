@@ -1,7 +1,7 @@
 [package]
-name = "suiyi"
-version = "0.8.2"
-description = "随译 — 全局划词翻译"
+name = "slip"
+version = "0.9.0"
+description = "素笺 — 全局划词翻译"
 edition = "2021"
 rust-version = "1.77"
 
