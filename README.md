@@ -116,7 +116,7 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 | 平台 | 抓选区方式 | 状态 |
 | --- | --- | --- |
 | macOS 12+ | 模拟 ⌘C（兜底系统辅助功能接口 AX） | 已跑通，需在「辅助功能」里授权 |
-| Windows 10/11 | 模拟 Ctrl+C（先写哨兵再判定，结果必还原剪贴板；兜底 UI Automation 的 TextPattern） | 已跑通，无需授权 |
+| Windows 10/11 | 优先 UI Automation 的 TextPattern，取不到再用模拟 Ctrl+C（先写哨兵再判定，结果必还原剪贴板） | 已跑通，无需授权 |
 
 两端功能对齐：划词先冒小图标、悬停/点击展开、单词卡片（音标/词性/多义/例句/更多释义）、
 ✨AI 精解、朗读、查词、改原文重译、存生词、复制、25 秒不悬停自动收起、托盘菜单、开机自启。
@@ -125,8 +125,15 @@ src-tauri/src/translate.rs 翻译线路（Google 免费接口）
 `NSPanel` 换成一个 36×36 的置顶 webview 窗口；`AVSpeechSynthesizer` 换成 WebView2 的 `speechSynthesis`；
 `AXSelectedText` 换成 UI Automation 的 `TextPattern`；气泡高度由前端量内容后回传，不再写死。
 
-排障：Windows 上如果模拟 Ctrl+C 被第三方输入法/远程桌面吞掉，可以设环境变量 `SUIYI_NO_COPY=1`
-启动，直接走 UI Automation 读选区（慢一点，但对 Chromium/Office/WPF/UWP/记事本都有效）。
+Windows 上怎么判断「这次拖拽到底选中了没有」：拖拽落点如果是桌面/任务栏这类 shell 表面，或者
+松手时窗口不是前台窗口（Ctrl+C 会打到别的程序上、复制走它的旧选区），直接跳过；拿到选区后还会
+把文本的包围盒和这次拖拽的矩形求交，对不上就判定为「选区别处」放弃。这样按住左键在空白处划一下
+不会再把上一次的残留选区翻出来。
+
+排障开关（两个都可以单独设）：
+
+- `SUIYI_NO_COPY=1`：跳过模拟 Ctrl+C，只用 UI Automation 读选区（慢一点，但对 Chromium/Office/WPF/UWP/记事本都有效）。
+- `SUIYI_NO_AX=1`：反过来，只用模拟 Ctrl+C（某些自绘控件、远程桌面里 UIA 会一直报「没有选区」时用这个）。
 
 `.github/workflows/release.yml` 里已经把双端的依赖和构建矩阵写好了（打 tag 触发，并自动把安装包挂到 Release）。
 
